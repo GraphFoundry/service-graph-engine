@@ -1,12 +1,15 @@
 const axios = require('axios');
 const config = require('./config');
 
+// Helper to construct the BY clause
+const BY_CLAUSE = 'by (source_workload, source_workload_namespace, destination_workload, destination_workload_namespace)';
+
 const QUERIES = {
-    rps: `sum(rate(istio_requests_total[${config.prometheus.queryWindow}])) by (source_workload, destination_workload)`,
-    errorRate: `sum(rate(istio_requests_total{response_code=~"5.."}[${config.prometheus.queryWindow}])) by (source_workload, destination_workload)`,
-    p50: `histogram_quantile(0.50, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, destination_workload))`,
-    p95: `histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, destination_workload))`,
-    p99: `histogram_quantile(0.99, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, destination_workload))`,
+    rps: `sum(rate(istio_requests_total[${config.prometheus.queryWindow}])) ${BY_CLAUSE}`,
+    errorRate: `sum(rate(istio_requests_total{response_code=~"5.."}[${config.prometheus.queryWindow}])) ${BY_CLAUSE}`,
+    p50: `histogram_quantile(0.50, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
+    p95: `histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
+    p99: `histogram_quantile(0.99, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
 };
 
 async function fetchPrometheusFiles() {
@@ -24,20 +27,39 @@ async function fetchPrometheusFiles() {
 
             const results = response.data.data.result;
 
+            if (results.length > 0 && name === 'rate') {
+                console.log('DEBUG: Sample Metric Labels:', JSON.stringify(results[0].metric, null, 2));
+            }
+
             results.forEach(result => {
-                const source = result.metric.source_workload;
-                const destination = result.metric.destination_workload;
+                const sourceName = result.metric.source_workload;
+                const sourceNs = result.metric.source_workload_namespace;
+                const destName = result.metric.destination_workload;
+                const destNs = result.metric.destination_workload_namespace;
 
                 // Normalization: Ignore unknown or empty workloads
-                if (!source || source === 'unknown' || !destination || destination === 'unknown') {
+                if (!sourceName || sourceName === 'unknown' || !destName || destName === 'unknown') {
                     return;
                 }
 
-                const key = `${source}|${destination}`;
+                // DEBUG: Check if we are dropping due to namespace
+                if (!sourceNs || sourceNs === 'unknown' || !destNs || destNs === 'unknown') {
+                    if (Math.random() < 0.01) console.log(`DEBUG: Dropping due to namespace: src=${sourceNs}, dest=${destNs}`);
+                    return;
+                }
+
+                const sourceId = `${sourceNs}:${sourceName}`;
+                const destId = `${destNs}:${destName}`;
+                const key = `${sourceId}|${destId}`;
+
                 if (!metricsMap.has(key)) {
                     metricsMap.set(key, {
-                        source,
-                        destination,
+                        sourceId,
+                        sourceName,
+                        sourceNamespace: sourceNs,
+                        destId,
+                        destName,
+                        destNamespace: destNs,
                         rate: 0,
                         errorRate: 0,
                         p50: 0,
