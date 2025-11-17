@@ -1,12 +1,12 @@
 const config = require('./src/config');
 const { fetchPrometheusFiles } = require('./src/prometheus');
-const { updateGraph, closeDriver } = require('./src/neo4j');
+const { updateGraph, closeDriver, initSchema } = require('./src/neo4j');
 
 async function runSync() {
     console.log(`[${new Date().toISOString()}] Starting sync cycle...`);
     try {
         const metrics = await fetchPrometheusFiles();
-        if (metrics.length > 0) {
+        if (metrics && metrics.length > 0) {
             console.log(`Fetched ${metrics.length} edges.`);
             await updateGraph(metrics);
         } else {
@@ -17,8 +17,11 @@ async function runSync() {
     }
 }
 
-(async function startService() {
+async function startService() {
     console.log('Starting Istio Telemetry Syncer...');
+
+    // Initialize Schema
+    await initSchema();
 
     // Run immediately on start
     await runSync();
@@ -38,5 +41,6 @@ async function runSync() {
 
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
-})();
+}
 
+startService();
