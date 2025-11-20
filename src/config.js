@@ -11,6 +11,7 @@ module.exports = {
     password: process.env.NEO4J_PASSWORD || 'Ex-hfrpIOCfghD-dZ04f2ya3-zbUpBdsZSgjwl6a8Rg',
   },
   app: {
-    pollIntervalMs: 10000, // 10 seconds
+    pollIntervalMs: 30000, // 30 seconds
+    scoreCalculationIntervalMs: 120000, // 2 minutes
   }
 };

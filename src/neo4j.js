@@ -99,4 +99,4 @@ async function closeDriver() {
     await driver.close();
 }
 
-module.exports = { initSchema, updateGraph, closeDriver };
+module.exports = { initSchema, updateGraph, closeDriver, driver };
