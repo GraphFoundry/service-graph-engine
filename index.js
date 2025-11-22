@@ -1,7 +1,7 @@
 const config = require('./src/config');
 const { fetchPrometheusFiles } = require('./src/prometheus');
 const { updateGraph, closeDriver, initSchema } = require('./src/neo4j');
-const { checkGDSAvailability, calculateScores } = require('./src/scores');
+const { checkGDSAvailability, calculateScores } = require('./src/scores_local');
 
 async function runSync() {
     console.log(`[${new Date().toISOString()}] Starting sync cycle...`);
