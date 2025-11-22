@@ -13,6 +13,8 @@
   "dependencies": {
     "axios": "^1.13.2",
     "dotenv": "^17.2.3",
+    "graphology": "^0.26.0",
+    "graphology-library": "^0.8.0",
     "neo4j-driver": "^6.0.1"
   }
 }
