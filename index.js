@@ -2,6 +2,7 @@ const config = require('./src/config');
 const { fetchPrometheusFiles } = require('./src/prometheus');
 const { updateGraph, closeDriver, initSchema } = require('./src/neo4j');
 const { checkGDSAvailability, calculateScores } = require('./src/scores_local');
+const { startServer } = require('./src/server');
 
 async function runSync() {
     console.log(`[${new Date().toISOString()}] Starting sync cycle...`);
@@ -40,6 +41,9 @@ async function startService() {
     // Schedule Score Calculation
     const scoreIntervalId = setInterval(calculateScores, config.app.scoreCalculationIntervalMs);
     console.log(`Score Calculation started. Interval: ${config.app.scoreCalculationIntervalMs / 1000} seconds.`);
+
+    // Start API Server
+    startServer();
 
     // Graceful shutdown
     const shutdown = async () => {

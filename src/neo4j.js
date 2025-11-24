@@ -87,6 +87,7 @@ async function updateGraph(metrics) {
             windowEnd
         });
 
+        lastUpdateTime = Date.now();
         console.log(`Updated graph successfully with ${metrics.length} edges (Snapshot + History).`);
     } catch (error) {
         console.error('Error writing to Neo4j:', error);
@@ -99,4 +100,10 @@ async function closeDriver() {
     await driver.close();
 }
 
-module.exports = { initSchema, updateGraph, closeDriver, driver };
+let lastUpdateTime = null;
+
+function getLastUpdateTime() {
+    return lastUpdateTime;
+}
+
+module.exports = { initSchema, updateGraph, closeDriver, driver, getLastUpdateTime };

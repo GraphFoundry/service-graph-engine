@@ -13,5 +13,6 @@ module.exports = {
   app: {
     pollIntervalMs: 30000, // 30 seconds
     scoreCalculationIntervalMs: 120000, // 2 minutes
+    port: process.env.PORT || 3000
   }
 };
