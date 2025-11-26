@@ -62,14 +62,14 @@ app.get('/services/:service/peers', async (req, res) => {
         if (direction === 'out') {
             query = `
                 MATCH (s:Service {name: $service})-[r:CALLS_NOW]->(p:Service)
-                RETURN p.name AS service, r.rate AS rate, r.p95 AS p95
+                RETURN p.name AS service, r.rate AS rate, r.p50 AS p50, r.p95 AS p95, r.p99 AS p99, r.errorRate AS errorRate
                 ORDER BY r.rate DESC
                 LIMIT $limit
             `;
         } else {
             query = `
                 MATCH (s:Service {name: $service})<-[r:CALLS_NOW]-(p:Service)
-                RETURN p.name AS service, r.rate AS rate, r.p95 AS p95
+                RETURN p.name AS service, r.rate AS rate, r.p50 AS p50, r.p95 AS p95, r.p99 AS p99, r.errorRate AS errorRate
                 ORDER BY r.rate DESC
                 LIMIT $limit
             `;
@@ -80,7 +80,10 @@ app.get('/services/:service/peers', async (req, res) => {
             service: record.get('service'),
             metrics: {
                 rate: record.get('rate'),
-                p95: record.get('p95')
+                p50: record.get('p50'),
+                p95: record.get('p95'),
+                p99: record.get('p99'),
+                errorRate: record.get('errorRate')
             }
         }));
 
@@ -110,7 +113,7 @@ app.get('/services/:service/neighborhood', async (req, res) => {
             MATCH p = (center:Service {name: $service})-[*1..${k}]-(m)
             UNWIND relationships(p) as r
             UNWIND nodes(p) as n
-            RETURN collect(distinct n.name) as nodes, collect(distinct {from: startNode(r).name, to: endNode(r).name, rate: r.rate}) as edges
+            RETURN collect(distinct n.name) as nodes, collect(distinct {from: startNode(r).name, to: endNode(r).name, rate: r.rate, p50: r.p50, p95: r.p95, p99: r.p99, errorRate: r.errorRate}) as edges
         `;
 
         const result = await session.run(query, { service });
