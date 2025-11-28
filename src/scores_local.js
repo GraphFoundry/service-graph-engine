@@ -1,4 +1,5 @@
 const { driver } = require('./neo4j');
+const config = require('./config');
 const Graph = require('graphology');
 const pagerank = require('graphology-metrics/centrality/pagerank');
 const betweenness = require('graphology-metrics/centrality/betweenness');
@@ -9,7 +10,7 @@ const betweenness = require('graphology-metrics/centrality/betweenness');
  */
 async function calculateScores() {
     console.log('Starting Client-Side Score Calculation Job...');
-    const session = driver.session();
+    const session = driver.session({ database: config.neo4j.database });
     let graph;
 
     try {
