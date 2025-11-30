@@ -224,14 +224,14 @@ app.get('/services/:service/peers', async (req, res) => {
         if (direction === 'out') {
             query = `
                 MATCH (s:Service {name: $service})-[r:CALLS_NOW]->(p:Service)
-                RETURN p.name AS service, r.rate AS rate, r.p50 AS p50, r.p95 AS p95, r.p99 AS p99, r.errorRate AS errorRate
+                RETURN p.name AS service, p.podCount AS podCount, p.availability AS availability, r.rate AS rate, r.p50 AS p50, r.p95 AS p95, r.p99 AS p99, r.errorRate AS errorRate
                 ORDER BY r.rate DESC
                 LIMIT $limit
             `;
         } else {
             query = `
                 MATCH (s:Service {name: $service})<-[r:CALLS_NOW]-(p:Service)
-                RETURN p.name AS service, r.rate AS rate, r.p50 AS p50, r.p95 AS p95, r.p99 AS p99, r.errorRate AS errorRate
+                RETURN p.name AS service, p.podCount AS podCount, p.availability AS availability, r.rate AS rate, r.p50 AS p50, r.p95 AS p95, r.p99 AS p99, r.errorRate AS errorRate
                 ORDER BY r.rate DESC
                 LIMIT $limit
             `;
@@ -240,6 +240,8 @@ app.get('/services/:service/peers', async (req, res) => {
         const result = await session.run(query, { service, limit: neo4j.int(limit) });
         const peers = result.records.map(record => ({
             service: record.get('service'),
+            podCount: record.get('podCount') || 0,
+            availability: record.get('availability') || 1,
             metrics: {
                 rate: record.get('rate'),
                 p50: record.get('p50'),
