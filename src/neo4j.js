@@ -28,11 +28,15 @@ async function initSchema() {
 const SNAPSHOT_QUERY = `
 UNWIND $batch AS row
 MERGE (a:Service {serviceId: row.sourceId})
-  ON CREATE SET a.name = row.sourceName, a.namespace = row.sourceNamespace, a.createdAt = datetime()
-  ON MATCH SET a.updatedAt = datetime()
+  ON CREATE SET a.name = row.sourceName, a.namespace = row.sourceNamespace, a.createdAt = datetime(),
+                a.podCount = row.sourcePodCount, a.availability = row.sourceAvailability
+  ON MATCH SET a.updatedAt = datetime(),
+               a.podCount = row.sourcePodCount, a.availability = row.sourceAvailability
 MERGE (b:Service {serviceId: row.destId})
-  ON CREATE SET b.name = row.destName, b.namespace = row.destNamespace, b.createdAt = datetime()
-  ON MATCH SET b.updatedAt = datetime()
+  ON CREATE SET b.name = row.destName, b.namespace = row.destNamespace, b.createdAt = datetime(),
+                b.podCount = row.destPodCount, b.availability = row.destAvailability
+  ON MATCH SET b.updatedAt = datetime(),
+               b.podCount = row.destPodCount, b.availability = row.destAvailability
 MERGE (a)-[r:CALLS_NOW]->(b)
 SET
   r.rate = row.rate,

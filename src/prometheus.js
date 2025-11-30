@@ -10,12 +10,34 @@ const QUERIES = {
     p50: `histogram_quantile(0.50, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
     p95: `histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
     p99: `histogram_quantile(0.99, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
+    availability: `sum(rate(istio_requests_total{reporter="destination", response_code!~"5.*"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace) / sum(rate(istio_requests_total{reporter="destination"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace)`,
+    podCount: `count(sum(rate(istio_requests_total{reporter="destination"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace, instance)) by (destination_workload, destination_workload_namespace)`
 };
 
 async function fetchPrometheusFiles() {
     const metricsMap = new Map();
+    const nodeMetricsMap = new Map(); // Key: "namespace:name", Value: { availability, podCount }
 
-    const fetchMetric = async (name, query) => {
+    // Helper to store node metrics
+    const storeNodeMetric = (name, results) => {
+        results.forEach(result => {
+            const workload = result.metric.destination_workload;
+            const ns = result.metric.destination_workload_namespace;
+            if (!workload || workload === 'unknown' || !ns || ns === 'unknown') return;
+
+            const id = `${ns}:${workload}`;
+            if (!nodeMetricsMap.has(id)) {
+                nodeMetricsMap.set(id, { availability: available = 1, podCount: 0 });
+            }
+
+            const val = parseFloat(result.value[1]);
+            if (!isNaN(val)) {
+                nodeMetricsMap.get(id)[name] = val;
+            }
+        });
+    };
+
+    const fetchMetric = async (name, query, isNodeMetric = false) => {
         try {
             const url = `${config.prometheus.url}/api/v1/query`;
             const response = await axios.get(url, { params: { query } });
@@ -29,6 +51,12 @@ async function fetchPrometheusFiles() {
 
             if (results.length > 0 && name === 'rate') {
                 console.log('DEBUG: Sample Metric Labels:', JSON.stringify(results[0].metric, null, 2));
+            }
+
+
+            if (isNodeMetric) {
+                storeNodeMetric(name, results);
+                return;
             }
 
             results.forEach(result => {
@@ -84,7 +112,20 @@ async function fetchPrometheusFiles() {
         fetchMetric('p50', QUERIES.p50),
         fetchMetric('p95', QUERIES.p95),
         fetchMetric('p99', QUERIES.p99),
+        fetchMetric('availability', QUERIES.availability, true),
+        fetchMetric('podCount', QUERIES.podCount, true)
     ]);
+
+    // Enrich edges with Node metrics
+    for (const metric of metricsMap.values()) {
+        const sourceNode = nodeMetricsMap.get(metric.sourceId) || { availability: 1, podCount: 0 };
+        const destNode = nodeMetricsMap.get(metric.destId) || { availability: 1, podCount: 0 };
+
+        metric.sourceAvailability = sourceNode.availability;
+        metric.sourcePodCount = sourceNode.podCount;
+        metric.destAvailability = destNode.availability;
+        metric.destPodCount = destNode.podCount;
+    }
 
     return Array.from(metricsMap.values());
 }
