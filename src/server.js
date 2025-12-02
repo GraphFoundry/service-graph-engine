@@ -3,12 +3,59 @@ const neo4j = require('neo4j-driver');
 const cors = require('cors');
 const config = require('./config');
 const { getLastUpdateTime, driver } = require('./neo4j');
+const { specs, swaggerUi } = require('./swagger');
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
+// Swagger Documentation
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(specs, {
+    explorer: true,
+    customCss: '.swagger-ui .topbar { display: none }',
+}));
+
+// Swagger JSON endpoint
+app.get('/swagger.json', (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.send(specs);
+});
+
+/**
+ * @openapi
+ * /graph/health:
+ *   get:
+ *     operationId: getGraphHealth
+ *     tags:
+ *       - Health
+ *     summary: Get graph health status
+ *     description: Returns the current health status of the service graph, including last update time and staleness indicator
+ *     responses:
+ *       200:
+ *         description: Health status retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: "OK"
+ *                 lastUpdatedSecondsAgo:
+ *                   type: integer
+ *                   nullable: true
+ *                   example: 45
+ *                   description: Seconds since last update, null if never updated
+ *                 windowMinutes:
+ *                   type: integer
+ *                   example: 5
+ *                   description: Time window for staleness check
+ *                 stale:
+ *                   type: boolean
+ *                   example: false
+ *                   description: Whether the data is considered stale
+ */
 // Graph Metadata / Health
 app.get('/graph/health', (req, res) => {
     const lastUpdate = getLastUpdateTime();
@@ -32,9 +79,48 @@ app.get('/graph/health', (req, res) => {
     });
 });
 
+/**
+ * @openapi
+ * /services:
+ *   get:
+ *     operationId: listServices
+ *     tags:
+ *       - Services
+ *     summary: List all services
+ *     description: Retrieve a list of all services in the service graph
+ *     responses:
+ *       200:
+ *         description: List of services retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 services:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name:
+ *                         type: string
+ *                         example: "frontend"
+ *                       namespace:
+ *                         type: string
+ *                         example: "default"
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Internal Server Error"
+ */
 // Service Discovery
 app.get('/services', async (req, res) => {
-    const session = driver.session();
+    const session = driver.session({ database: config.neo4j.database });
     try {
         const result = await session.run('MATCH (s:Service) RETURN s.name AS name, s.namespace AS namespace');
         const services = result.records.map(record => ({
@@ -50,12 +136,88 @@ app.get('/services', async (req, res) => {
     }
 });
 
+/**
+ * @openapi
+ * /services/{service}/peers:
+ *   get:
+ *     operationId: getServicePeers
+ *     tags:
+ *       - Services
+ *     summary: Get service peers (dependencies)
+ *     description: Retrieve the top peers (upstream or downstream dependencies) for a given service
+ *     parameters:
+ *       - in: path
+ *         name: service
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The service name
+ *         example: "frontend"
+ *       - in: query
+ *         name: direction
+ *         schema:
+ *           type: string
+ *           enum: [out, in]
+ *           default: out
+ *         description: Direction of dependencies (out=downstream, in=upstream)
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Maximum number of peers to return
+ *     responses:
+ *       200:
+ *         description: Peers retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 service:
+ *                   type: string
+ *                   example: "frontend"
+ *                 direction:
+ *                   type: string
+ *                   example: "out"
+ *                 windowMinutes:
+ *                   type: integer
+ *                   example: 5
+ *                 peers:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       service:
+ *                         type: string
+ *                         example: "backend"
+ *                       metrics:
+ *                         type: object
+ *                         properties:
+ *                           rate:
+ *                             type: number
+ *                             example: 150.5
+ *                           p50:
+ *                             type: number
+ *                             example: 25.3
+ *                           p95:
+ *                             type: number
+ *                             example: 120.7
+ *                           p99:
+ *                             type: number
+ *                             example: 250.2
+ *                           errorRate:
+ *                             type: number
+ *                             example: 0.02
+ *       500:
+ *         description: Internal server error
+ */
 // Dependency Queries - Peers
 app.get('/services/:service/peers', async (req, res) => {
     const { service } = req.params;
     const direction = req.query.direction || 'out';
     const limit = parseInt(req.query.limit) || 5;
-    const session = driver.session();
+    const session = driver.session({ database: config.neo4j.database });
 
     try {
         let query = '';
@@ -103,11 +265,82 @@ app.get('/services/:service/peers', async (req, res) => {
     }
 });
 
+/**
+ * @openapi
+ * /services/{service}/neighborhood:
+ *   get:
+ *     operationId: getServiceNeighborhood
+ *     tags:
+ *       - Services
+ *     summary: Get service neighborhood graph
+ *     description: Retrieve a k-hop neighborhood subgraph centered on a given service
+ *     parameters:
+ *       - in: path
+ *         name: service
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: The center service name
+ *         example: "frontend"
+ *       - in: query
+ *         name: k
+ *         schema:
+ *           type: integer
+ *           default: 2
+ *         description: Number of hops (depth) for the neighborhood
+ *     responses:
+ *       200:
+ *         description: Neighborhood graph retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 center:
+ *                   type: string
+ *                   example: "frontend"
+ *                 k:
+ *                   type: integer
+ *                   example: 2
+ *                 nodes:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                   example: ["frontend", "backend", "database"]
+ *                 edges:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       from:
+ *                         type: string
+ *                         example: "frontend"
+ *                       to:
+ *                         type: string
+ *                         example: "backend"
+ *                       rate:
+ *                         type: number
+ *                         example: 150.5
+ *                       p50:
+ *                         type: number
+ *                         example: 25.3
+ *                       p95:
+ *                         type: number
+ *                         example: 120.7
+ *                       p99:
+ *                         type: number
+ *                         example: 250.2
+ *                       errorRate:
+ *                         type: number
+ *                         example: 0.02
+ *       500:
+ *         description: Internal server error
+ */
 // Dependency Queries - Neighborhood
 app.get('/services/:service/neighborhood', async (req, res) => {
     const { service } = req.params;
     const k = parseInt(req.query.k) || 2;
-    const session = driver.session();
+    const session = driver.session({ database: config.neo4j.database });
 
     try {
         // Pure Cypher approach for small k
@@ -162,9 +395,46 @@ app.get('/services/:service/neighborhood', async (req, res) => {
     }
 });
 
+/**
+ * @openapi
+ * /centrality:
+ *   get:
+ *     operationId: getCentralityScores
+ *     tags:
+ *       - Centrality
+ *     summary: Get centrality scores for all services
+ *     description: Retrieve PageRank and betweenness centrality scores for all services
+ *     responses:
+ *       200:
+ *         description: Centrality scores retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 windowMinutes:
+ *                   type: integer
+ *                   example: 5
+ *                 scores:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       service:
+ *                         type: string
+ *                         example: "frontend"
+ *                       pagerank:
+ *                         type: number
+ *                         example: 0.85
+ *                       betweenness:
+ *                         type: number
+ *                         example: 0.42
+ *       500:
+ *         description: Internal server error
+ */
 // Centrality APIs
 app.get('/centrality', async (req, res) => {
-    const session = driver.session();
+    const session = driver.session({ database: config.neo4j.database });
     try {
         const result = await session.run('MATCH (s:Service) RETURN s.name AS service, s.pagerank AS pagerank, s.betweenness AS betweenness');
         const scores = result.records.map(record => ({
@@ -185,10 +455,68 @@ app.get('/centrality', async (req, res) => {
     }
 });
 
+/**
+ * @openapi
+ * /centrality/top:
+ *   get:
+ *     operationId: getTopCentralityServices
+ *     tags:
+ *       - Centrality
+ *     summary: Get top services by centrality metric
+ *     description: Retrieve the top N services ranked by a specific centrality metric
+ *     parameters:
+ *       - in: query
+ *         name: metric
+ *         schema:
+ *           type: string
+ *           enum: [pagerank, betweenness]
+ *           default: pagerank
+ *         description: The centrality metric to rank by
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 5
+ *         description: Maximum number of top services to return
+ *     responses:
+ *       200:
+ *         description: Top services retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 metric:
+ *                   type: string
+ *                   example: "pagerank"
+ *                 top:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       service:
+ *                         type: string
+ *                         example: "gateway"
+ *                       value:
+ *                         type: number
+ *                         example: 0.95
+ *       400:
+ *         description: Invalid metric parameter
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Invalid metric. Allowed: pagerank, betweenness"
+ *       500:
+ *         description: Internal server error
+ */
 app.get('/centrality/top', async (req, res) => {
     const metric = req.query.metric || 'pagerank';
     const limit = parseInt(req.query.limit) || 5;
-    const session = driver.session();
+    const session = driver.session({ database: config.neo4j.database });
 
     // Whitelist metric to prevent injection
     const validMetrics = ['pagerank', 'betweenness'];

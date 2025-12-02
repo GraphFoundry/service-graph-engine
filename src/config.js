@@ -9,10 +9,11 @@ module.exports = {
     uri: process.env.NEO4J_URI || 'neo4j+s://517b3e75.databases.neo4j.io',
     user: process.env.NEO4J_USER || 'neo4j',
     password: process.env.NEO4J_PASSWORD || 'Ex-hfrpIOCfghD-dZ04f2ya3-zbUpBdsZSgjwl6a8Rg',
+    database: process.env.NEO4J_DATABASE || 'neo4j',
   },
   app: {
-    pollIntervalMs: 30000, // 30 seconds
-    scoreCalculationIntervalMs: 120000, // 2 minutes
+    pollIntervalMs: process.env.POLL_INTERVAL_Ms || 30000, // 30 seconds
+    scoreCalculationIntervalMs: process.env.SCORE_CALCULATION_INTERVAL_Ms || 120000, // 2 minutes
     port: process.env.PORT || 3000
   }
 };

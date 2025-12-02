@@ -7,7 +7,7 @@ const driver = neo4j.driver(
 );
 
 async function initSchema() {
-    const session = driver.session();
+    const session = driver.session({ database: config.neo4j.database });
     try {
         console.log('Initializing schema...');
         // Constraints
@@ -70,7 +70,7 @@ async function updateGraph(metrics) {
         return;
     }
 
-    const session = driver.session();
+    const session = driver.session({ database: config.neo4j.database });
     const now = Date.now();
     const windowEnd = new Date(now).toISOString();
     // Prometheus aggregation is trailing window. If we query valid rate[1m] at T, it covers T-1m to T.
