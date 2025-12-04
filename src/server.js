@@ -24,6 +24,187 @@ app.get('/swagger.json', (req, res) => {
 
 /**
  * @openapi
+ * /metrics/snapshot:
+ *   get:
+ *     operationId: getMetricsSnapshot
+ *     tags:
+ *       - Metrics
+ *     summary: Get latest metrics snapshot
+ *     description: Returns the latest aggregated metrics snapshot for all services and edges in the current window
+ *     responses:
+ *       200:
+ *         description: Metrics snapshot retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *                   example: "2026-01-04T06:00:00Z"
+ *                   description: Timestamp of the snapshot
+ *                 window:
+ *                   type: string
+ *                   example: "1m"
+ *                   description: Time window for metric aggregation
+ *                 services:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name:
+ *                         type: string
+ *                         example: "payment"
+ *                       namespace:
+ *                         type: string
+ *                         example: "default"
+ *                       rps:
+ *                         type: number
+ *                         example: 12.3
+ *                         description: Requests per second (sum of all edges)
+ *                       errorRate:
+ *                         type: number
+ *                         example: 0.01
+ *                         description: Error rate (weighted average)
+ *                       p95:
+ *                         type: number
+ *                         example: 120.5
+ *                         description: 95th percentile latency in milliseconds (max across edges)
+ *                 edges:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       from:
+ *                         type: string
+ *                         example: "frontend"
+ *                       to:
+ *                         type: string
+ *                         example: "payment"
+ *                       namespace:
+ *                         type: string
+ *                         example: "default"
+ *                       rps:
+ *                         type: number
+ *                         example: 5.2
+ *                       errorRate:
+ *                         type: number
+ *                         example: 0.00
+ *                       p95:
+ *                         type: number
+ *                         example: 80.1
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Internal Server Error"
+ */
+app.get('/metrics/snapshot', async (req, res) => {
+    const session = driver.session({ database: config.neo4j.database });
+    try {
+        const lastUpdate = getLastUpdateTime();
+        if (!lastUpdate) {
+            return res.status(503).json({ error: 'No metrics available yet' });
+        }
+
+        // Query all edges with current metrics
+        const edgeQuery = `
+            MATCH (a:Service)-[r:CALLS_NOW]->(b:Service)
+            RETURN a.name AS fromName, a.namespace AS fromNs,
+                   b.name AS toName, b.namespace AS toNs,
+                   r.rate AS rps, r.errorRate AS errorRate, r.p95 AS p95
+        `;
+        const edgeResult = await session.run(edgeQuery);
+
+        // Build edges array and collect service metrics
+        const edges = [];
+        const serviceMetrics = new Map(); // Key: "namespace:name"
+
+        edgeResult.records.forEach(record => {
+            const fromName = record.get('fromName');
+            const fromNs = record.get('fromNs');
+            const toName = record.get('toName');
+            const toNs = record.get('toNs');
+            const rps = record.get('rps') || 0;
+            const errorRate = record.get('errorRate') || 0;
+            const p95 = record.get('p95') || 0;
+
+            // Add to edges array
+            edges.push({
+                from: fromName,
+                to: toName,
+                namespace: toNs, // Edge belongs to destination namespace
+                rps: parseFloat(rps.toFixed(2)),
+                errorRate: parseFloat(errorRate.toFixed(4)),
+                p95: parseFloat(p95.toFixed(2))
+            });
+
+            // Aggregate metrics for source service
+            const fromKey = `${fromNs}:${fromName}`;
+            if (!serviceMetrics.has(fromKey)) {
+                serviceMetrics.set(fromKey, {
+                    name: fromName,
+                    namespace: fromNs,
+                    totalRps: 0,
+                    totalErrors: 0,
+                    maxP95: 0
+                });
+            }
+            const fromMetric = serviceMetrics.get(fromKey);
+            fromMetric.totalRps += rps;
+            fromMetric.totalErrors += rps * errorRate;
+            fromMetric.maxP95 = Math.max(fromMetric.maxP95, p95);
+
+            // Aggregate metrics for destination service
+            const toKey = `${toNs}:${toName}`;
+            if (!serviceMetrics.has(toKey)) {
+                serviceMetrics.set(toKey, {
+                    name: toName,
+                    namespace: toNs,
+                    totalRps: 0,
+                    totalErrors: 0,
+                    maxP95: 0
+                });
+            }
+            const toMetric = serviceMetrics.get(toKey);
+            toMetric.totalRps += rps;
+            toMetric.totalErrors += rps * errorRate;
+            toMetric.maxP95 = Math.max(toMetric.maxP95, p95);
+        });
+
+        // Build services array
+        const services = Array.from(serviceMetrics.values()).map(metric => ({
+            name: metric.name,
+            namespace: metric.namespace,
+            rps: parseFloat(metric.totalRps.toFixed(2)),
+            errorRate: metric.totalRps > 0 
+                ? parseFloat((metric.totalErrors / metric.totalRps).toFixed(4))
+                : 0,
+            p95: parseFloat(metric.maxP95.toFixed(2))
+        }));
+
+        res.json({
+            timestamp: new Date(lastUpdate).toISOString(),
+            window: config.prometheus.queryWindow,
+            services,
+            edges
+        });
+    } catch (error) {
+        console.error('Error in /metrics/snapshot:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    } finally {
+        await session.close();
+    }
+});
+
+/**
+ * @openapi
  * /graph/health:
  *   get:
  *     operationId: getGraphHealth
