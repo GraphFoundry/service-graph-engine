@@ -41,6 +41,10 @@ const options = {
         description: 'Graph health and metadata endpoints',
       },
       {
+        name: 'Metrics',
+        description: 'Aggregated metrics and snapshots',
+      },
+      {
         name: 'Services',
         description: 'Service discovery and dependency queries',
       },
