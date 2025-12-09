@@ -288,6 +288,14 @@ app.get('/graph/health', (req, res) => {
  *                       namespace:
  *                         type: string
  *                         example: "default"
+ *                       podCount:
+ *                         type: integer
+ *                         example: 3
+ *                         description: Number of pods running for this service
+ *                       availability:
+ *                         type: number
+ *                         example: 1.0
+ *                         description: Service availability (0.0 to 1.0)
  *       500:
  *         description: Internal server error
  *         content:
@@ -303,10 +311,12 @@ app.get('/graph/health', (req, res) => {
 app.get('/services', async (req, res) => {
     const session = driver.session({ database: config.neo4j.database });
     try {
-        const result = await session.run('MATCH (s:Service) RETURN s.name AS name, s.namespace AS namespace');
+        const result = await session.run('MATCH (s:Service) RETURN s.name AS name, s.namespace AS namespace, s.podCount AS podCount, s.availability AS availability');
         const services = result.records.map(record => ({
             name: record.get('name'),
-            namespace: record.get('namespace')
+            namespace: record.get('namespace'),
+            podCount: record.get('podCount') || 0,
+            availability: record.get('availability') || 1
         }));
         res.json({ services });
     } catch (error) {
@@ -486,8 +496,22 @@ app.get('/services/:service/peers', async (req, res) => {
  *                 nodes:
  *                   type: array
  *                   items:
- *                     type: string
- *                   example: ["frontend", "backend", "database"]
+ *                     type: object
+ *                     properties:
+ *                       name:
+ *                         type: string
+ *                         example: "frontend"
+ *                       namespace:
+ *                         type: string
+ *                         example: "default"
+ *                       podCount:
+ *                         type: integer
+ *                         example: 3
+ *                         description: Number of pods running for this service
+ *                       availability:
+ *                         type: number
+ *                         example: 1.0
+ *                         description: Service availability (0.0 to 1.0)
  *                 edges:
  *                   type: array
  *                   items:
@@ -529,7 +553,8 @@ app.get('/services/:service/neighborhood', async (req, res) => {
             MATCH p = (center:Service {name: $service})-[*1..${k}]-(m)
             UNWIND relationships(p) as r
             UNWIND nodes(p) as n
-            RETURN collect(distinct n.name) as nodes, collect(distinct {from: startNode(r).name, to: endNode(r).name, rate: r.rate, p50: r.p50, p95: r.p95, p99: r.p99, errorRate: r.errorRate}) as edges
+            RETURN collect(distinct {name: n.name, namespace: n.namespace, podCount: n.podCount, availability: n.availability}) as nodes, 
+                   collect(distinct {from: startNode(r).name, to: endNode(r).name, rate: r.rate, p50: r.p50, p95: r.p95, p99: r.p99, errorRate: r.errorRate}) as edges
         `;
 
         const result = await session.run(query, { service });
@@ -549,9 +574,15 @@ app.get('/services/:service/neighborhood', async (req, res) => {
             // With MATCH p = ... it requires at least one pattern match.
             // So if isolated, it returns nothing.
             // To handle isolated center:
-            const centerCheck = await session.run('MATCH (s:Service {name: $service}) RETURN s.name');
+            const centerCheck = await session.run('MATCH (s:Service {name: $service}) RETURN s.name, s.namespace, s.podCount, s.availability');
             if (centerCheck.records.length > 0) {
-                nodes = [service];
+                const record = centerCheck.records[0];
+                nodes = [{
+                    name: record.get('name'),
+                    namespace: record.get('namespace'),
+                    podCount: record.get('podCount') || 0,
+                    availability: record.get('availability') || 1
+                }];
             }
         }
 
