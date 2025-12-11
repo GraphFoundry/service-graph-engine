@@ -477,7 +477,7 @@ app.get('/services/:service/peers', async (req, res) => {
  *         name: k
  *         schema:
  *           type: integer
- *           default: 2
+ *           default: 1
  *         description: Number of hops (depth) for the neighborhood
  *     responses:
  *       200:
@@ -544,7 +544,7 @@ app.get('/services/:service/peers', async (req, res) => {
 // Dependency Queries - Neighborhood
 app.get('/services/:service/neighborhood', async (req, res) => {
     const { service } = req.params;
-    const k = parseInt(req.query.k) || 2;
+    const k = parseInt(req.query.k) || 1;
     const session = driver.session({ database: config.neo4j.database });
 
     try {
