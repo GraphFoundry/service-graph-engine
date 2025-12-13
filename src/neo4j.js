@@ -49,6 +49,12 @@ SET
   r.lastUpdated = datetime()
 `;
 
+const MARK_UNAVAILABLE_QUERY = `
+MATCH (s:Service)
+WHERE NOT s.serviceId IN $activeServiceIds
+SET s.availability = 0, s.podCount = 0, s.updatedAt = datetime()
+`;
+
 const HISTORY_QUERY = `
 UNWIND $batch AS row
 MATCH (a:Service {serviceId: row.sourceId})
@@ -65,11 +71,6 @@ SET
 `;
 
 async function updateGraph(metrics) {
-    if (!metrics || metrics.length === 0) {
-        console.log('No metrics to write to Neo4j.');
-        return;
-    }
-
     const session = driver.session({ database: config.neo4j.database });
     const now = Date.now();
     const windowEnd = new Date(now).toISOString();
@@ -77,22 +78,41 @@ async function updateGraph(metrics) {
     const windowStart = new Date(now - 60000).toISOString();
 
     try {
-        // 1. Update Snapshot
-        await session.run(SNAPSHOT_QUERY, {
-            batch: metrics,
-            windowStart,
-            windowEnd
-        });
+        if (!metrics || metrics.length === 0) {
+            console.log('No metrics from Prometheus. Marking all services as unavailable.');
+            // Mark all existing services as unavailable
+            await session.run(MARK_UNAVAILABLE_QUERY, { activeServiceIds: [] });
+        } else {
+            // 1. Update Snapshot
+            await session.run(SNAPSHOT_QUERY, {
+                batch: metrics,
+                windowStart,
+                windowEnd
+            });
 
-        // 2. Append History
-        await session.run(HISTORY_QUERY, {
-            batch: metrics,
-            windowStart,
-            windowEnd
-        });
+            // 2. Collect active service IDs from current metrics
+            const activeServiceIds = new Set();
+            metrics.forEach(metric => {
+                activeServiceIds.add(metric.sourceId);
+                activeServiceIds.add(metric.destId);
+            });
+
+            // 3. Mark services not in active list as unavailable
+            await session.run(MARK_UNAVAILABLE_QUERY, {
+                activeServiceIds: Array.from(activeServiceIds)
+            });
+
+            // 4. Append History
+            await session.run(HISTORY_QUERY, {
+                batch: metrics,
+                windowStart,
+                windowEnd
+            });
+
+            console.log(`Updated graph successfully with ${metrics.length} edges (Snapshot + History).`);
+        }
 
         lastUpdateTime = Date.now();
-        console.log(`Updated graph successfully with ${metrics.length} edges (Snapshot + History).`);
     } catch (error) {
         console.error('Error writing to Neo4j:', error);
     } finally {

@@ -293,9 +293,10 @@ app.get('/graph/health', (req, res) => {
  *                         example: 3
  *                         description: Number of pods running for this service
  *                       availability:
- *                         type: number
- *                         example: 1.0
- *                         description: Service availability (0.0 to 1.0)
+ *                         type: integer
+ *                         enum: [0, 1]
+ *                         example: 1
+ *                         description: Service availability as boolean (0=unavailable, 1=available)
  *       500:
  *         description: Internal server error
  *         content:
@@ -315,8 +316,8 @@ app.get('/services', async (req, res) => {
         const services = result.records.map(record => ({
             name: record.get('name'),
             namespace: record.get('namespace'),
-            podCount: record.get('podCount') || 0,
-            availability: record.get('availability') || 1
+            podCount: Math.floor(Number(record.get('podCount') || 0)),
+            availability: Number(record.get('availability') || 0) >= 0.5 ? 1 : 0
         }));
         res.json({ services });
     } catch (error) {
@@ -431,8 +432,8 @@ app.get('/services/:service/peers', async (req, res) => {
         const result = await session.run(query, { service, limit: neo4j.int(limit) });
         const peers = result.records.map(record => ({
             service: record.get('service'),
-            podCount: record.get('podCount') || 0,
-            availability: record.get('availability') || 1,
+            podCount: Math.floor(Number(record.get('podCount') || 0)),
+            availability: Number(record.get('availability') || 0) >= 0.5 ? 1 : 0,
             metrics: {
                 rate: record.get('rate'),
                 p50: record.get('p50'),
@@ -509,9 +510,10 @@ app.get('/services/:service/peers', async (req, res) => {
  *                         example: 3
  *                         description: Number of pods running for this service
  *                       availability:
- *                         type: number
- *                         example: 1.0
- *                         description: Service availability (0.0 to 1.0)
+ *                         type: integer
+ *                         enum: [0, 1]
+ *                         example: 1
+ *                         description: Service availability as boolean (0=unavailable, 1=available)
  *                 edges:
  *                   type: array
  *                   items:
@@ -563,7 +565,11 @@ app.get('/services/:service/neighborhood', async (req, res) => {
         let edges = [];
 
         if (result.records.length > 0) {
-            nodes = result.records[0].get('nodes');
+            nodes = result.records[0].get('nodes').map(node => ({
+                ...node,
+                podCount: Math.floor(Number(node.podCount || 0)),
+                availability: Number(node.availability || 0) >= 0.5 ? 1 : 0
+            }));
             edges = result.records[0].get('edges');
         } else {
             // Handle case where service exists but has no neighbors or doesn't exist?
@@ -580,8 +586,8 @@ app.get('/services/:service/neighborhood', async (req, res) => {
                 nodes = [{
                     name: record.get('name'),
                     namespace: record.get('namespace'),
-                    podCount: record.get('podCount') || 0,
-                    availability: record.get('availability') || 1
+                    podCount: Math.floor(Number(record.get('podCount') || 0)),
+                    availability: Number(record.get('availability') || 0) >= 0.5 ? 1 : 0
                 }];
             }
         }
