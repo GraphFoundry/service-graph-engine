@@ -27,12 +27,20 @@ async function fetchPrometheusFiles() {
 
             const id = `${ns}:${workload}`;
             if (!nodeMetricsMap.has(id)) {
-                nodeMetricsMap.set(id, { availability: available = 1, podCount: 0 });
+                nodeMetricsMap.set(id, { availability: 0, podCount: 0 });
             }
 
             const val = parseFloat(result.value[1]);
             if (!isNaN(val)) {
-                nodeMetricsMap.get(id)[name] = val;
+                if (name === 'availability') {
+                    // Convert availability to 0 or 1 (integer boolean)
+                    nodeMetricsMap.get(id)[name] = val >= 0.5 ? 1 : 0;
+                } else if (name === 'podCount') {
+                    // Ensure podCount is an integer
+                    nodeMetricsMap.get(id)[name] = Math.floor(val);
+                } else {
+                    nodeMetricsMap.get(id)[name] = val;
+                }
             }
         });
     };
@@ -118,8 +126,8 @@ async function fetchPrometheusFiles() {
 
     // Enrich edges with Node metrics
     for (const metric of metricsMap.values()) {
-        const sourceNode = nodeMetricsMap.get(metric.sourceId) || { availability: 1, podCount: 0 };
-        const destNode = nodeMetricsMap.get(metric.destId) || { availability: 1, podCount: 0 };
+        const sourceNode = nodeMetricsMap.get(metric.sourceId) || { availability: 0, podCount: 0 };
+        const destNode = nodeMetricsMap.get(metric.destId) || { availability: 0, podCount: 0 };
 
         metric.sourceAvailability = sourceNode.availability;
         metric.sourcePodCount = sourceNode.podCount;
