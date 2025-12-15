@@ -117,7 +117,9 @@ app.get('/metrics/snapshot', async (req, res) => {
         const edgeQuery = `
             MATCH (a:Service)-[r:CALLS_NOW]->(b:Service)
             RETURN a.name AS fromName, a.namespace AS fromNs,
+                   a.podCount AS fromPodCount, a.availability AS fromAvailability,
                    b.name AS toName, b.namespace AS toNs,
+                   b.podCount AS toPodCount, b.availability AS toAvailability,
                    r.rate AS rps, r.errorRate AS errorRate, r.p95 AS p95
         `;
         const edgeResult = await session.run(edgeQuery);
@@ -129,8 +131,12 @@ app.get('/metrics/snapshot', async (req, res) => {
         edgeResult.records.forEach(record => {
             const fromName = record.get('fromName');
             const fromNs = record.get('fromNs');
+            const fromPodCount = record.get('fromPodCount');
+            const fromAvailability = record.get('fromAvailability');
             const toName = record.get('toName');
             const toNs = record.get('toNs');
+            const toPodCount = record.get('toPodCount');
+            const toAvailability = record.get('toAvailability');
             const rps = record.get('rps') || 0;
             const errorRate = record.get('errorRate') || 0;
             const p95 = record.get('p95') || 0;
@@ -153,7 +159,9 @@ app.get('/metrics/snapshot', async (req, res) => {
                     namespace: fromNs,
                     totalRps: 0,
                     totalErrors: 0,
-                    maxP95: 0
+                    maxP95: 0,
+                    podCount: fromPodCount,
+                    availability: fromAvailability
                 });
             }
             const fromMetric = serviceMetrics.get(fromKey);
@@ -169,7 +177,9 @@ app.get('/metrics/snapshot', async (req, res) => {
                     namespace: toNs,
                     totalRps: 0,
                     totalErrors: 0,
-                    maxP95: 0
+                    maxP95: 0,
+                    podCount: toPodCount,
+                    availability: toAvailability
                 });
             }
             const toMetric = serviceMetrics.get(toKey);
@@ -186,7 +196,9 @@ app.get('/metrics/snapshot', async (req, res) => {
             errorRate: metric.totalRps > 0 
                 ? parseFloat((metric.totalErrors / metric.totalRps).toFixed(4))
                 : 0,
-            p95: parseFloat(metric.maxP95.toFixed(2))
+            p95: parseFloat(metric.maxP95.toFixed(2)),
+            podCount: metric.podCount || 0,
+            availability: metric.availability || 0
         }));
 
         res.json({
@@ -317,7 +329,7 @@ app.get('/services', async (req, res) => {
             name: record.get('name'),
             namespace: record.get('namespace'),
             podCount: Math.floor(Number(record.get('podCount') || 0)),
-            availability: Number(record.get('availability') || 0) >= 0.5 ? 1 : 0
+            availability: Number(record.get('availability') || 0)
         }));
         res.json({ services });
     } catch (error) {
