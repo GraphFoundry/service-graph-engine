@@ -11,7 +11,9 @@ const QUERIES = {
     p95: `histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
     p99: `histogram_quantile(0.99, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
     availability: `sum(rate(istio_requests_total{reporter="destination", response_code!~"5.*"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace) / sum(rate(istio_requests_total{reporter="destination"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace)`,
-    podCount: `count(sum(rate(istio_requests_total{reporter="destination"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace, instance)) by (destination_workload, destination_workload_namespace)`
+    podCount: `count(sum(rate(istio_requests_total{reporter="destination"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace, instance)) by (destination_workload, destination_workload_namespace)`,
+    // Use istio metrics to get pod and node information - labels are 'pod' and 'node'
+    podPlacement: `count(istio_requests_total{reporter="destination"}) by (pod, node, destination_workload, destination_workload_namespace)`
 };
 
 async function fetchPrometheusFiles() {
@@ -138,4 +140,54 @@ async function fetchPrometheusFiles() {
     return Array.from(metricsMap.values());
 }
 
-module.exports = { fetchPrometheusFiles };
+async function fetchPodPlacement() {
+    try {
+        const url = `${config.prometheus.url}/api/v1/query`;
+        const response = await axios.get(url, { params: { query: QUERIES.podPlacement } });
+
+        if (response.data.status !== 'success') {
+            console.error('Error fetching pod placement:', response.data.error);
+            return new Map();
+        }
+
+        const placementMap = new Map(); // Key: "namespace:workload", Value: { nodes: [{node, pods}] }
+        const results = response.data.data.result;
+
+        results.forEach(result => {
+            // Get labels from Istio metrics - labels are 'pod' and 'node'
+            const pod = result.metric.pod;
+            const node = result.metric.node;
+            const workload = result.metric.destination_workload;
+            const namespace = result.metric.destination_workload_namespace;
+
+            if (!workload || !node || !namespace || !pod) {
+                return;
+            }
+
+            const key = `${namespace}:${workload}`;
+            
+            if (!placementMap.has(key)) {
+                placementMap.set(key, { nodes: [] });
+            }
+
+            const placement = placementMap.get(key);
+            let nodeEntry = placement.nodes.find(n => n.node === node);
+            
+            if (!nodeEntry) {
+                nodeEntry = { node, pods: [] };
+                placement.nodes.push(nodeEntry);
+            }
+            
+            if (!nodeEntry.pods.includes(pod)) {
+                nodeEntry.pods.push(pod);
+            }
+        });
+
+        return placementMap;
+    } catch (error) {
+        console.error('Failed to fetch pod placement:', error.message);
+        return new Map();
+    }
+}
+
+module.exports = { fetchPrometheusFiles, fetchPodPlacement };

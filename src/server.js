@@ -309,6 +309,25 @@ app.get('/graph/health', (req, res) => {
  *                         enum: [0, 1]
  *                         example: 1
  *                         description: Service availability as boolean (0=unavailable, 1=available)
+ *                       placement:
+ *                         type: object
+ *                         description: Pod placement information showing which Kubernetes nodes host the service's pods
+ *                         properties:
+ *                           nodes:
+ *                             type: array
+ *                             items:
+ *                               type: object
+ *                               properties:
+ *                                 node:
+ *                                   type: string
+ *                                   example: "minikube-m02"
+ *                                   description: Kubernetes node name
+ *                                 pods:
+ *                                   type: array
+ *                                   items:
+ *                                     type: string
+ *                                   example: ["frontend-6fd958545-bbrq2", "frontend-6fd958545-xyz12"]
+ *                                   description: List of pod names running on this node
  *       500:
  *         description: Internal server error
  *         content:
@@ -324,13 +343,26 @@ app.get('/graph/health', (req, res) => {
 app.get('/services', async (req, res) => {
     const session = driver.session({ database: config.neo4j.database });
     try {
+        const { fetchPodPlacement } = require('./prometheus');
+        
+        // Fetch pod placement data
+        const placementMap = await fetchPodPlacement();
+        
         const result = await session.run('MATCH (s:Service) RETURN s.name AS name, s.namespace AS namespace, s.podCount AS podCount, s.availability AS availability');
-        const services = result.records.map(record => ({
-            name: record.get('name'),
-            namespace: record.get('namespace'),
-            podCount: Math.floor(Number(record.get('podCount') || 0)),
-            availability: Number(record.get('availability') || 0)
-        }));
+        const services = result.records.map(record => {
+            const name = record.get('name');
+            const namespace = record.get('namespace');
+            const key = `${namespace}:${name}`;
+            const placement = placementMap.get(key) || { nodes: [] };
+            
+            return {
+                name,
+                namespace,
+                podCount: Math.floor(Number(record.get('podCount') || 0)),
+                availability: Number(record.get('availability') || 0),
+                placement
+            };
+        });
         res.json({ services });
     } catch (error) {
         console.error('Error in /services:', error);
