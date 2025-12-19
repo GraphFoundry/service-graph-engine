@@ -193,7 +193,7 @@ app.get('/metrics/snapshot', async (req, res) => {
             name: metric.name,
             namespace: metric.namespace,
             rps: parseFloat(metric.totalRps.toFixed(2)),
-            errorRate: metric.totalRps > 0 
+            errorRate: metric.totalRps > 0
                 ? parseFloat((metric.totalErrors / metric.totalRps).toFixed(4))
                 : 0,
             p95: parseFloat(metric.maxP95.toFixed(2)),
@@ -343,24 +343,51 @@ app.get('/graph/health', (req, res) => {
 app.get('/services', async (req, res) => {
     const session = driver.session({ database: config.neo4j.database });
     try {
-        const { fetchPodPlacement } = require('./prometheus');
-        
-        // Fetch pod placement data
-        const placementMap = await fetchPodPlacement();
-        
-        const result = await session.run('MATCH (s:Service) RETURN s.name AS name, s.namespace AS namespace, s.podCount AS podCount, s.availability AS availability');
+        const query = `
+            MATCH (s:Service)
+            OPTIONAL MATCH (s)-[:HAS_POD]->(p:Pod)-[:RUNS_ON]->(n:Node)
+            RETURN s.name AS name, s.namespace AS namespace, s.podCount AS podCount, s.availability AS availability,
+                   collect({pod: p.name, node: n.name, 
+                            cpuUsed: n.cpuUsed, cpuTotal: n.cpuTotal, 
+                            ramUsed: n.ramUsed, ramTotal: n.ramTotal}) AS placementData
+        `;
+
+        const result = await session.run(query);
         const services = result.records.map(record => {
             const name = record.get('name');
             const namespace = record.get('namespace');
-            const key = `${namespace}:${name}`;
-            const placement = placementMap.get(key) || { nodes: [] };
-            
+            const podCount = Math.floor(Number(record.get('podCount') || 0));
+            const availability = Number(record.get('availability') || 0);
+            const placementData = record.get('placementData');
+
+            // Group by Node
+            const nodesMap = new Map();
+            placementData.forEach(item => {
+                if (!item.node) return; // Handle cases with no pods/nodes
+
+                if (!nodesMap.has(item.node)) {
+                    nodesMap.set(item.node, {
+                        node: item.node,
+                        resources: {
+                            cpu: { used: item.cpuUsed || 0, total: item.cpuTotal || 0, unit: 'cores' },
+                            ram: { used: item.ramUsed || 0, total: item.ramTotal || 0, unit: 'bytes' }
+                        },
+                        pods: []
+                    });
+                }
+                if (item.pod) {
+                    nodesMap.get(item.node).pods.push(item.pod);
+                }
+            });
+
             return {
                 name,
                 namespace,
-                podCount: Math.floor(Number(record.get('podCount') || 0)),
-                availability: Number(record.get('availability') || 0),
-                placement
+                podCount,
+                availability,
+                placement: {
+                    nodes: Array.from(nodesMap.values())
+                }
             };
         });
         res.json({ services });

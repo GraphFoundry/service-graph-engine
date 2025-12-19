@@ -16,6 +16,8 @@ async function initSchema() {
         // Indexes
         await session.run('CREATE INDEX service_name_idx IF NOT EXISTS FOR (s:Service) ON (s.name)');
         await session.run('CREATE INDEX service_ns_idx IF NOT EXISTS FOR (s:Service) ON (s.namespace)');
+        await session.run('CREATE CONSTRAINT node_name_unique IF NOT EXISTS FOR (n:Node) REQUIRE n.name IS UNIQUE');
+        await session.run('CREATE CONSTRAINT pod_name_unique IF NOT EXISTS FOR (p:Pod) REQUIRE p.name IS UNIQUE');
 
         console.log('Schema initialized.');
     } catch (error) {
@@ -120,6 +122,44 @@ async function updateGraph(metrics) {
     }
 }
 
+const INFRA_UPDATE_QUERY = `
+UNWIND $batchNodes AS row
+MERGE (n:Node {name: row.name})
+SET n.cpuUsed = row.cpuUsed, n.cpuTotal = row.cpuTotal, 
+    n.ramUsed = row.ramUsed, n.ramTotal = row.ramTotal, 
+    n.updatedAt = datetime()
+
+WITH 1 as dummy
+UNWIND $batchServices AS sRow
+MATCH (s:Service {namespace: sRow.namespace, name: sRow.name})
+FOREACH (pRow IN sRow.pods |
+  MERGE (p:Pod {name: pRow.name})
+  MERGE (s)-[:HAS_POD]->(p)
+  MERGE (n:Node {name: pRow.node})
+  MERGE (p)-[:RUNS_ON]->(n)
+)
+`;
+
+async function updateInfrastructure(data) {
+    const session = driver.session({ database: config.neo4j.database });
+    try {
+        if (!data.nodes || data.nodes.length === 0) {
+            console.log('No infrastructure data to update.');
+            return;
+        }
+
+        await session.run(INFRA_UPDATE_QUERY, {
+            batchNodes: data.nodes,
+            batchServices: data.services
+        });
+        console.log(`Updated infrastructure: ${data.nodes.length} nodes, ${data.services.length} services with pods.`);
+    } catch (error) {
+        console.error('Error updating infrastructure in Neo4j:', error);
+    } finally {
+        await session.close();
+    }
+}
+
 async function closeDriver() {
     await driver.close();
 }
@@ -130,4 +170,4 @@ function getLastUpdateTime() {
     return lastUpdateTime;
 }
 
-module.exports = { initSchema, updateGraph, closeDriver, driver, getLastUpdateTime };
+module.exports = { initSchema, updateGraph, updateInfrastructure, closeDriver, driver, getLastUpdateTime };
