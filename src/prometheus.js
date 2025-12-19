@@ -13,7 +13,12 @@ const QUERIES = {
     availability: `sum(rate(istio_requests_total{reporter="destination", response_code!~"5.*"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace) / sum(rate(istio_requests_total{reporter="destination"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace)`,
     podCount: `count(sum(rate(istio_requests_total{reporter="destination"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace, instance)) by (destination_workload, destination_workload_namespace)`,
     // Use istio metrics to get pod and node information - labels are 'pod' and 'node'
-    podPlacement: `count(istio_requests_total{reporter="destination"}) by (pod, node, destination_workload, destination_workload_namespace)`
+    podPlacement: `count(istio_requests_total{reporter="destination"}) by (pod, node, destination_workload, destination_workload_namespace)`,
+    // Node Resource Queries (Raw Values)
+    nodeCPUUsed: `sum(rate(node_cpu_seconds_total{mode!="idle"}[1m])) by (instance)`,
+    nodeCPUTotal: `count(node_cpu_seconds_total{mode="idle"}) by (instance)`,
+    nodeRAMUsed: `avg(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) by (instance)`,
+    nodeRAMTotal: `avg(node_memory_MemTotal_bytes) by (instance)`
 };
 
 async function fetchPrometheusFiles() {
@@ -165,19 +170,19 @@ async function fetchPodPlacement() {
             }
 
             const key = `${namespace}:${workload}`;
-            
+
             if (!placementMap.has(key)) {
                 placementMap.set(key, { nodes: [] });
             }
 
             const placement = placementMap.get(key);
             let nodeEntry = placement.nodes.find(n => n.node === node);
-            
+
             if (!nodeEntry) {
                 nodeEntry = { node, pods: [] };
                 placement.nodes.push(nodeEntry);
             }
-            
+
             if (!nodeEntry.pods.includes(pod)) {
                 nodeEntry.pods.push(pod);
             }
@@ -190,4 +195,101 @@ async function fetchPodPlacement() {
     }
 }
 
-module.exports = { fetchPrometheusFiles, fetchPodPlacement };
+async function fetchInfrastructure() {
+    try {
+        const url = `${config.prometheus.url}/api/v1/query`;
+
+        // Fetch Pod Placement and Node Metrics in parallel
+        const [placementRes, cpuUsedRes, cpuTotalRes, ramUsedRes, ramTotalRes] = await Promise.all([
+            axios.get(url, { params: { query: QUERIES.podPlacement } }),
+            axios.get(url, { params: { query: QUERIES.nodeCPUUsed } }),
+            axios.get(url, { params: { query: QUERIES.nodeCPUTotal } }),
+            axios.get(url, { params: { query: QUERIES.nodeRAMUsed } }),
+            axios.get(url, { params: { query: QUERIES.nodeRAMTotal } })
+        ]);
+
+        const nodesMap = new Map(); // Key: nodeName, Value: { name, cpuUsed, cpuTotal, ramUsed, ramTotal, pods: [] }
+        const servicesMap = new Map(); // Key: "ns:service", Value: { name, namespace, pods: [] }
+
+        // Process Node Metrics first to populate nodes
+        const processNodeMetric = (response, field) => {
+            if (response.data.status === 'success') {
+                response.data.data.result.forEach(r => {
+                    let nodeName = r.metric.node || r.metric.instance;
+                    if (nodeName) {
+                        if (!nodesMap.has(nodeName)) {
+                            nodesMap.set(nodeName, {
+                                name: nodeName,
+                                cpuUsed: 0, cpuTotal: 0,
+                                ramUsed: 0, ramTotal: 0,
+                                pods: []
+                            });
+                        }
+                        const val = parseFloat(r.value[1]);
+                        if (!isNaN(val)) nodesMap.get(nodeName)[field] = val;
+                    }
+                });
+            }
+        };
+
+        processNodeMetric(cpuUsedRes, 'cpuUsed');
+        processNodeMetric(cpuTotalRes, 'cpuTotal');
+        processNodeMetric(ramUsedRes, 'ramUsed');
+        processNodeMetric(ramTotalRes, 'ramTotal');
+
+        // Process Placement
+        if (placementRes.data.status === 'success') {
+            const results = placementRes.data.data.result;
+            console.log(`DEBUG: fetchInfrastructure found ${results.length} placement records.`);
+
+            if (results.length > 0) {
+                console.log('DEBUG: detailed sample placement:', JSON.stringify(results[0].metric, null, 2));
+            }
+
+            results.forEach(r => {
+                const podName = r.metric.pod;
+                const nodeName = r.metric.node;
+                const serviceName = r.metric.destination_workload;
+                const namespace = r.metric.destination_workload_namespace;
+
+                if (!podName || !serviceName || !namespace) return;
+
+                // Ensure Node exists (if we have nodeName)
+                if (nodeName) {
+                    if (!nodesMap.has(nodeName)) {
+                        nodesMap.set(nodeName, {
+                            name: nodeName,
+                            cpuUsed: 0, cpuTotal: 0,
+                            ramUsed: 0, ramTotal: 0,
+                            pods: []
+                        });
+                    }
+                    nodesMap.get(nodeName).pods.push(podName);
+                }
+
+                // Ensure Service exists
+                const serviceKey = `${namespace}:${serviceName}`;
+                if (!servicesMap.has(serviceKey)) {
+                    servicesMap.set(serviceKey, { name: serviceName, namespace, pods: [] });
+                }
+
+                // Add pod to service (with node reference)
+                servicesMap.get(serviceKey).pods.push({
+                    name: podName,
+                    node: nodeName
+                });
+            });
+        }
+
+        return {
+            nodes: Array.from(nodesMap.values()),
+            services: Array.from(servicesMap.values())
+        };
+
+    } catch (error) {
+        console.error('Failed to fetch infrastructure:', error.message);
+        return { nodes: [], services: [] };
+    }
+}
+
+module.exports = { fetchPrometheusFiles, fetchPodPlacement, fetchInfrastructure };

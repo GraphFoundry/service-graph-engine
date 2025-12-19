@@ -1,6 +1,6 @@
 const config = require('./src/config');
-const { fetchPrometheusFiles } = require('./src/prometheus');
-const { updateGraph, closeDriver, initSchema } = require('./src/neo4j');
+const { fetchPrometheusFiles, fetchInfrastructure } = require('./src/prometheus');
+const { updateGraph, updateInfrastructure, closeDriver, initSchema } = require('./src/neo4j');
 const { checkGDSAvailability, calculateScores } = require('./src/scores_local');
 const { startServer } = require('./src/server');
 
@@ -13,6 +13,11 @@ async function runSync() {
             await updateGraph(metrics);
         } else {
             console.log('Fetched 0 edges (empty result from Prometheus).');
+        }
+
+        const infra = await fetchInfrastructure();
+        if (infra && infra.nodes.length > 0) {
+            await updateInfrastructure(infra);
         }
     } catch (error) {
         console.error('Error during sync cycle:', error);
