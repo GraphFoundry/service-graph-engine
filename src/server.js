@@ -639,7 +639,7 @@ app.get('/services/:service/neighborhood', async (req, res) => {
             nodes = result.records[0].get('nodes').map(node => ({
                 ...node,
                 podCount: Math.floor(Number(node.podCount || 0)),
-                availability: Number(node.availability || 0) >= 0.5 ? 1 : 0
+                availability: Number(node.availability || 0)
             }));
             edges = result.records[0].get('edges');
         } else {
@@ -658,7 +658,7 @@ app.get('/services/:service/neighborhood', async (req, res) => {
                     name: record.get('name'),
                     namespace: record.get('namespace'),
                     podCount: Math.floor(Number(record.get('podCount') || 0)),
-                    availability: Number(record.get('availability') || 0) >= 0.5 ? 1 : 0
+                    availability: Number(record.get('availability') || 0)
                 }];
             }
         }
