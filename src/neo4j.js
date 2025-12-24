@@ -125,8 +125,8 @@ async function updateGraph(metrics) {
 const INFRA_UPDATE_QUERY = `
 UNWIND $batchNodes AS row
 MERGE (n:Node {name: row.name})
-SET n.cpuUsed = row.cpuUsed, n.cpuTotal = row.cpuTotal, 
-    n.ramUsed = row.ramUsed, n.ramTotal = row.ramTotal, 
+SET n.cpuUsagePercent = row.cpuUsagePercent, n.cores = row.cores, 
+    n.ramUsedMB = row.ramUsedMB, n.ramTotalMB = row.ramTotalMB, 
     n.updatedAt = datetime()
 
 WITH 1 as dummy

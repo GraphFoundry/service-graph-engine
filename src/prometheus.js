@@ -14,11 +14,15 @@ const QUERIES = {
     podCount: `count(sum(rate(istio_requests_total{reporter="destination"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace, instance)) by (destination_workload, destination_workload_namespace)`,
     // Use istio metrics to get pod and node information - labels are 'pod' and 'node'
     podPlacement: `count(istio_requests_total{reporter="destination"}) by (pod, node, destination_workload, destination_workload_namespace)`,
-    // Node Resource Queries (Raw Values)
-    nodeCPUUsed: `sum(rate(node_cpu_seconds_total{mode!="idle"}[1m])) by (instance)`,
-    nodeCPUTotal: `count(node_cpu_seconds_total{mode="idle"}) by (instance)`,
-    nodeRAMUsed: `avg(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) by (instance)`,
-    nodeRAMTotal: `avg(node_memory_MemTotal_bytes) by (instance)`
+    // Node Resource Queries using cAdvisor metrics (exposed by kubelet, no node-exporter needed)
+    // NOTE: These use 'instance' label which matches K8s node name (no port suffix like node-exporter)
+    nodeCPUUsed: `sum(rate(container_cpu_usage_seconds_total[1m])) by (instance)`,
+    nodeCPUTotal: `machine_cpu_cores`,
+    nodeRAMUsed: `sum(container_memory_working_set_bytes) by (instance)`,
+    nodeRAMTotal: `machine_memory_bytes`
+    // Note: Per-pod metrics not available from cAdvisor in this Prometheus setup
+    // cAdvisor exports container metrics but without pod name labels
+    // Pod-level metrics would require Kubernetes metrics-server API
 };
 
 async function fetchPrometheusFiles() {
@@ -208,26 +212,31 @@ async function fetchInfrastructure() {
             axios.get(url, { params: { query: QUERIES.nodeRAMTotal } })
         ]);
 
-        const nodesMap = new Map(); // Key: nodeName, Value: { name, cpuUsed, cpuTotal, ramUsed, ramTotal, pods: [] }
+        const nodesMap = new Map(); // Key: nodeName, Value: { name, cpuUsagePercent, cores, ramUsedMB, ramTotalMB, pods: [] }
         const servicesMap = new Map(); // Key: "ns:service", Value: { name, namespace, pods: [] }
 
-        // Process Node Metrics first to populate nodes
+        // Process Node Metrics - collect raw values first
+        const nodeRawMetrics = new Map(); // Key: nodeName, Value: { cpuUsed, cpuTotal, ramUsed, ramTotal }
+        
         const processNodeMetric = (response, field) => {
             if (response.data.status === 'success') {
                 response.data.data.result.forEach(r => {
-                    let nodeName = r.metric.node || r.metric.instance;
-                    if (nodeName) {
-                        if (!nodesMap.has(nodeName)) {
-                            nodesMap.set(nodeName, {
-                                name: nodeName,
-                                cpuUsed: 0, cpuTotal: 0,
-                                ramUsed: 0, ramTotal: 0,
-                                pods: []
-                            });
-                        }
-                        const val = parseFloat(r.value[1]);
-                        if (!isNaN(val)) nodesMap.get(nodeName)[field] = val;
+                    let instanceLabel = r.metric.node || r.metric.instance;
+                    if (!instanceLabel) return;
+                    
+                    // Normalize: strip port suffix (for future node-exporter compatibility)
+                    let nodeName = instanceLabel.replace(/:\d+$/, '');
+                    
+                    if (!nodeRawMetrics.has(nodeName)) {
+                        nodeRawMetrics.set(nodeName, {
+                            cpuUsed: 0,
+                            cpuTotal: 0,
+                            ramUsed: 0,
+                            ramTotal: 0
+                        });
                     }
+                    const val = Number.parseFloat(r.value[1]);
+                    if (!Number.isNaN(val)) nodeRawMetrics.get(nodeName)[field] = val;
                 });
             }
         };
@@ -236,6 +245,22 @@ async function fetchInfrastructure() {
         processNodeMetric(cpuTotalRes, 'cpuTotal');
         processNodeMetric(ramUsedRes, 'ramUsed');
         processNodeMetric(ramTotalRes, 'ramTotal');
+
+        // Convert raw metrics to final format
+        nodeRawMetrics.forEach((raw, nodeName) => {
+            const cpuUsagePercent = raw.cpuTotal > 0 ? (raw.cpuUsed / raw.cpuTotal * 100) : 0;
+            const ramUsedMB = raw.ramUsed / (1024 * 1024);
+            const ramTotalMB = raw.ramTotal / (1024 * 1024);
+            
+            nodesMap.set(nodeName, {
+                name: nodeName,
+                cpuUsagePercent: Number.parseFloat(cpuUsagePercent.toFixed(2)), // percentage
+                cores: raw.cpuTotal, // count
+                ramUsedMB: Number.parseFloat(ramUsedMB.toFixed(2)), // MB
+                ramTotalMB: Number.parseFloat(ramTotalMB.toFixed(2)), // MB
+                pods: []
+            });
+        });
 
         // Process Placement
         if (placementRes.data.status === 'success') {
@@ -259,11 +284,15 @@ async function fetchInfrastructure() {
                     if (!nodesMap.has(nodeName)) {
                         nodesMap.set(nodeName, {
                             name: nodeName,
-                            cpuUsed: 0, cpuTotal: 0,
-                            ramUsed: 0, ramTotal: 0,
+                            cpuUsagePercent: 0,
+                            cores: 0,
+                            ramUsedMB: 0,
+                            ramTotalMB: 0,
                             pods: []
                         });
                     }
+                    
+                    // Add pod name only (no per-pod metrics available from cAdvisor)
                     nodesMap.get(nodeName).pods.push(podName);
                 }
 
@@ -273,13 +302,18 @@ async function fetchInfrastructure() {
                     servicesMap.set(serviceKey, { name: serviceName, namespace, pods: [] });
                 }
 
-                // Add pod to service (with node reference)
+                // Add pod to service (with node reference, no per-pod metrics)
                 servicesMap.get(serviceKey).pods.push({
                     name: podName,
                     node: nodeName
                 });
             });
         }
+
+        // Log final node metrics
+        nodesMap.forEach((node, name) => {
+            console.log(`  - ${name}: cpu=${node.cpuUsagePercent}% (${node.cores} cores), ram=${node.ramUsedMB}/${node.ramTotalMB} MB, pods=${node.pods.length}`);
+        });
 
         return {
             nodes: Array.from(nodesMap.values()),

@@ -348,8 +348,8 @@ app.get('/services', async (req, res) => {
             OPTIONAL MATCH (s)-[:HAS_POD]->(p:Pod)-[:RUNS_ON]->(n:Node)
             RETURN s.name AS name, s.namespace AS namespace, s.podCount AS podCount, s.availability AS availability,
                    collect({pod: p.name, node: n.name, 
-                            cpuUsed: n.cpuUsed, cpuTotal: n.cpuTotal, 
-                            ramUsed: n.ramUsed, ramTotal: n.ramTotal}) AS placementData
+                            cpuUsagePercent: n.cpuUsagePercent, cores: n.cores, 
+                            ramUsedMB: n.ramUsedMB, ramTotalMB: n.ramTotalMB}) AS placementData
         `;
 
         const result = await session.run(query);
@@ -369,8 +369,14 @@ app.get('/services', async (req, res) => {
                     nodesMap.set(item.node, {
                         node: item.node,
                         resources: {
-                            cpu: { used: item.cpuUsed || 0, total: item.cpuTotal || 0, unit: 'cores' },
-                            ram: { used: item.ramUsed || 0, total: item.ramTotal || 0, unit: 'bytes' }
+                            cpu: { 
+                                usagePercent: Number.parseFloat((item.cpuUsagePercent || 0).toFixed(2)), 
+                                cores: item.cores || 0 
+                            },
+                            ram: { 
+                                usedMB: Number.parseFloat((item.ramUsedMB || 0).toFixed(2)), 
+                                totalMB: Number.parseFloat((item.ramTotalMB || 0).toFixed(2)) 
+                            }
                         },
                         pods: []
                     });
