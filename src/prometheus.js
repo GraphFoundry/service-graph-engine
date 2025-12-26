@@ -19,10 +19,11 @@ const QUERIES = {
     nodeCPUUsed: `sum(rate(container_cpu_usage_seconds_total[1m])) by (instance)`,
     nodeCPUTotal: `machine_cpu_cores`,
     nodeRAMUsed: `sum(container_memory_working_set_bytes) by (instance)`,
-    nodeRAMTotal: `machine_memory_bytes`
-    // Note: Per-pod metrics not available from cAdvisor in this Prometheus setup
-    // cAdvisor exports container metrics but without pod name labels
-    // Pod-level metrics would require Kubernetes metrics-server API
+    nodeRAMTotal: `machine_memory_bytes`,
+    // Pod-level Container Resource Queries (aggregated per pod)
+    // These work when cAdvisor aggregates at pod level (container label missing)
+    podRAMUsed: `sum(container_memory_working_set_bytes{pod!=""}) by (pod, namespace) / 1024 / 1024`,
+    podCPUUsed: `sum(rate(container_cpu_usage_seconds_total{pod!=""}[1m])) by (pod, namespace)`
 };
 
 async function fetchPrometheusFiles() {
@@ -203,17 +204,20 @@ async function fetchInfrastructure() {
     try {
         const url = `${config.prometheus.url}/api/v1/query`;
 
-        // Fetch Pod Placement and Node Metrics in parallel
-        const [placementRes, cpuUsedRes, cpuTotalRes, ramUsedRes, ramTotalRes] = await Promise.all([
+        // Fetch Pod Placement, Node Metrics, and Pod Container Metrics in parallel
+        const [placementRes, cpuUsedRes, cpuTotalRes, ramUsedRes, ramTotalRes, podRAMRes, podCPURes] = await Promise.all([
             axios.get(url, { params: { query: QUERIES.podPlacement } }),
             axios.get(url, { params: { query: QUERIES.nodeCPUUsed } }),
             axios.get(url, { params: { query: QUERIES.nodeCPUTotal } }),
             axios.get(url, { params: { query: QUERIES.nodeRAMUsed } }),
-            axios.get(url, { params: { query: QUERIES.nodeRAMTotal } })
+            axios.get(url, { params: { query: QUERIES.nodeRAMTotal } }),
+            axios.get(url, { params: { query: QUERIES.podRAMUsed } }),
+            axios.get(url, { params: { query: QUERIES.podCPUUsed } })
         ]);
 
         const nodesMap = new Map(); // Key: nodeName, Value: { name, cpuUsagePercent, cores, ramUsedMB, ramTotalMB, pods: [] }
         const servicesMap = new Map(); // Key: "ns:service", Value: { name, namespace, pods: [] }
+        const podMetricsMap = new Map(); // Key: "namespace:podName", Value: { ramUsedMB, cpuUsageCores }
 
         // Process Node Metrics - collect raw values first
         const nodeRawMetrics = new Map(); // Key: nodeName, Value: { cpuUsed, cpuTotal, ramUsed, ramTotal }
@@ -262,6 +266,43 @@ async function fetchInfrastructure() {
             });
         });
 
+        // Process Pod Container Metrics
+        if (podRAMRes.data.status === 'success') {
+            podRAMRes.data.data.result.forEach(r => {
+                const podName = r.metric.pod;
+                const namespace = r.metric.namespace;
+                if (!podName || !namespace) return;
+                
+                const key = `${namespace}:${podName}`;
+                if (!podMetricsMap.has(key)) {
+                    podMetricsMap.set(key, { ramUsedMB: 0, cpuUsageCores: 0 });
+                }
+                
+                const ramMB = Number.parseFloat(r.value[1]);
+                if (!Number.isNaN(ramMB)) {
+                    podMetricsMap.get(key).ramUsedMB = Number.parseFloat(ramMB.toFixed(2));
+                }
+            });
+        }
+
+        if (podCPURes.data.status === 'success') {
+            podCPURes.data.data.result.forEach(r => {
+                const podName = r.metric.pod;
+                const namespace = r.metric.namespace;
+                if (!podName || !namespace) return;
+                
+                const key = `${namespace}:${podName}`;
+                if (!podMetricsMap.has(key)) {
+                    podMetricsMap.set(key, { ramUsedMB: 0, cpuUsageCores: 0 });
+                }
+                
+                const cpuCores = Number.parseFloat(r.value[1]);
+                if (!Number.isNaN(cpuCores)) {
+                    podMetricsMap.get(key).cpuUsageCores = Number.parseFloat(cpuCores.toFixed(4));
+                }
+            });
+        }
+
         // Process Placement
         if (placementRes.data.status === 'success') {
             const results = placementRes.data.data.result;
@@ -302,10 +343,16 @@ async function fetchInfrastructure() {
                     servicesMap.set(serviceKey, { name: serviceName, namespace, pods: [] });
                 }
 
-                // Add pod to service (with node reference, no per-pod metrics)
+                // Get container metrics for this pod
+                const podMetricsKey = `${namespace}:${podName}`;
+                const podMetrics = podMetricsMap.get(podMetricsKey) || { ramUsedMB: 0, cpuUsageCores: 0 };
+
+                // Add pod to service (with node reference and container metrics)
                 servicesMap.get(serviceKey).pods.push({
                     name: podName,
-                    node: nodeName
+                    node: nodeName,
+                    ramUsedMB: podMetrics.ramUsedMB,
+                    cpuUsageCores: podMetrics.cpuUsageCores
                 });
             });
         }
