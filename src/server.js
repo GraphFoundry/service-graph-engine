@@ -348,6 +348,7 @@ app.get('/services', async (req, res) => {
             OPTIONAL MATCH (s)-[:HAS_POD]->(p:Pod)-[:RUNS_ON]->(n:Node)
             RETURN s.name AS name, s.namespace AS namespace, s.podCount AS podCount, s.availability AS availability,
                    collect({pod: p.name, node: n.name, 
+                            podRamUsedMB: p.ramUsedMB, podCpuUsageCores: p.cpuUsageCores,
                             cpuUsagePercent: n.cpuUsagePercent, cores: n.cores, 
                             ramUsedMB: n.ramUsedMB, ramTotalMB: n.ramTotalMB}) AS placementData
         `;
@@ -382,7 +383,15 @@ app.get('/services', async (req, res) => {
                     });
                 }
                 if (item.pod) {
-                    nodesMap.get(item.node).pods.push(item.pod);
+                    const nodeCores = item.cores || 1; // Avoid division by zero
+                    const cpuCores = item.podCpuUsageCores || 0;
+                    const cpuUsagePercent = (cpuCores / nodeCores) * 100;
+                    
+                    nodesMap.get(item.node).pods.push({
+                        name: item.pod,
+                        ramUsedMB: Number.parseFloat((item.podRamUsedMB || 0).toFixed(2)),
+                        cpuUsagePercent: Number.parseFloat(cpuUsagePercent.toFixed(2))
+                    });
                 }
             });
 
