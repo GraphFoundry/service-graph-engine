@@ -280,7 +280,7 @@ app.get('/graph/health', (req, res) => {
  *     tags:
  *       - Services
  *     summary: List all services
- *     description: Retrieve a list of all services in the service graph
+ *     description: Retrieve a list of all services in the service graph with pod-level resource metrics
  *     responses:
  *       200:
  *         description: List of services retrieved successfully
@@ -322,12 +322,50 @@ app.get('/graph/health', (req, res) => {
  *                                   type: string
  *                                   example: "minikube-m02"
  *                                   description: Kubernetes node name
+ *                                 resources:
+ *                                   type: object
+ *                                   description: Node-level resource usage
+ *                                   properties:
+ *                                     cpu:
+ *                                       type: object
+ *                                       properties:
+ *                                         usagePercent:
+ *                                           type: number
+ *                                           example: 7.96
+ *                                           description: Node CPU usage percentage
+ *                                         cores:
+ *                                           type: integer
+ *                                           example: 8
+ *                                           description: Total CPU cores available on node
+ *                                     ram:
+ *                                       type: object
+ *                                       properties:
+ *                                         usedMB:
+ *                                           type: number
+ *                                           example: 8107.19
+ *                                           description: RAM used on node in MB
+ *                                         totalMB:
+ *                                           type: number
+ *                                           example: 24026.4
+ *                                           description: Total RAM available on node in MB
  *                                 pods:
  *                                   type: array
+ *                                   description: List of pods running on this node with container-level metrics
  *                                   items:
- *                                     type: string
- *                                   example: ["frontend-6fd958545-bbrq2", "frontend-6fd958545-xyz12"]
- *                                   description: List of pod names running on this node
+ *                                     type: object
+ *                                     properties:
+ *                                       name:
+ *                                         type: string
+ *                                         example: "frontend-75d897db69-dmtzh"
+ *                                         description: Pod name
+ *                                       ramUsedMB:
+ *                                         type: number
+ *                                         example: 59.65
+ *                                         description: Pod RAM usage in MB (aggregated from all containers)
+ *                                       cpuUsagePercent:
+ *                                         type: number
+ *                                         example: 0.27
+ *                                         description: Pod CPU usage as percentage of node's total cores
  *       500:
  *         description: Internal server error
  *         content:
