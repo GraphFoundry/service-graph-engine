@@ -386,7 +386,7 @@ app.get('/services', async (req, res) => {
             OPTIONAL MATCH (s)-[:HAS_POD]->(p:Pod)-[:RUNS_ON]->(n:Node)
             RETURN s.name AS name, s.namespace AS namespace, s.podCount AS podCount, s.availability AS availability,
                    collect({pod: p.name, node: n.name, 
-                            podRamUsedMB: p.ramUsedMB, podCpuUsageCores: p.cpuUsageCores,
+                            podRamUsedMB: p.ramUsedMB, podCpuUsageCores: p.cpuUsageCores, podUptimeSeconds: p.uptimeSeconds,
                             cpuUsagePercent: n.cpuUsagePercent, cores: n.cores, 
                             ramUsedMB: n.ramUsedMB, ramTotalMB: n.ramTotalMB}) AS placementData
         `;
@@ -408,13 +408,13 @@ app.get('/services', async (req, res) => {
                     nodesMap.set(item.node, {
                         node: item.node,
                         resources: {
-                            cpu: { 
-                                usagePercent: Number.parseFloat((item.cpuUsagePercent || 0).toFixed(2)), 
-                                cores: item.cores || 0 
+                            cpu: {
+                                usagePercent: Number.parseFloat((item.cpuUsagePercent || 0).toFixed(2)),
+                                cores: item.cores || 0
                             },
-                            ram: { 
-                                usedMB: Number.parseFloat((item.ramUsedMB || 0).toFixed(2)), 
-                                totalMB: Number.parseFloat((item.ramTotalMB || 0).toFixed(2)) 
+                            ram: {
+                                usedMB: Number.parseFloat((item.ramUsedMB || 0).toFixed(2)),
+                                totalMB: Number.parseFloat((item.ramTotalMB || 0).toFixed(2))
                             }
                         },
                         pods: []
@@ -424,11 +424,12 @@ app.get('/services', async (req, res) => {
                     const nodeCores = item.cores || 1; // Avoid division by zero
                     const cpuCores = item.podCpuUsageCores || 0;
                     const cpuUsagePercent = (cpuCores / nodeCores) * 100;
-                    
+
                     nodesMap.get(item.node).pods.push({
                         name: item.pod,
                         ramUsedMB: Number.parseFloat((item.podRamUsedMB || 0).toFixed(2)),
-                        cpuUsagePercent: Number.parseFloat(cpuUsagePercent.toFixed(2))
+                        cpuUsagePercent: Number.parseFloat(cpuUsagePercent.toFixed(2)),
+                        uptimeSeconds: item.podUptimeSeconds || 0
                     });
                 }
             });
@@ -557,7 +558,7 @@ app.get('/services/:service/peers', async (req, res) => {
         const peers = result.records.map(record => ({
             service: record.get('service'),
             podCount: Math.floor(Number(record.get('podCount') || 0)),
-            availability: Number(record.get('availability') || 0) >= 0.5 ? 1 : 0,
+            availability: Number(record.get('availability') || 0),
             metrics: {
                 rate: record.get('rate'),
                 p50: record.get('p50'),
