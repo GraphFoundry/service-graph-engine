@@ -134,7 +134,7 @@ UNWIND $batchServices AS sRow
 MATCH (s:Service {namespace: sRow.namespace, name: sRow.name})
 FOREACH (pRow IN sRow.pods |
   MERGE (p:Pod {name: pRow.name})
-  SET p.ramUsedMB = pRow.ramUsedMB, p.cpuUsageCores = pRow.cpuUsageCores
+  SET p.ramUsedMB = pRow.ramUsedMB, p.cpuUsageCores = pRow.cpuUsageCores, p.uptimeSeconds = pRow.uptimeSeconds
   MERGE (s)-[:HAS_POD]->(p)
   MERGE (n:Node {name: pRow.node})
   MERGE (p)-[:RUNS_ON]->(n)
