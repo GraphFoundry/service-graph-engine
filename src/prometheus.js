@@ -201,110 +201,33 @@ async function fetchPodPlacement() {
     }
 }
 
+const { fetchKubernetesMetrics } = require('./kubernetes');
+
 async function fetchInfrastructure() {
     try {
         const url = `${config.prometheus.url}/api/v1/query`;
 
-        // Fetch Pod Placement, Node Metrics, and Pod Container Metrics in parallel
-        const [placementRes, cpuUsedRes, cpuTotalRes, ramUsedRes, ramTotalRes, podRAMRes, podCPURes, podUptimeRes] = await Promise.all([
+        // 1. Fetch Pod Placement (Graph Structure) from Prometheus/Istio
+        // 2. Fetch Node & Pod Stats from Kubernetes API (Resource Usage)
+        const [placementRes, k8sMetrics] = await Promise.all([
             axios.get(url, { params: { query: QUERIES.podPlacement } }),
-            axios.get(url, { params: { query: QUERIES.nodeCPUUsed } }),
-            axios.get(url, { params: { query: QUERIES.nodeCPUTotal } }),
-            axios.get(url, { params: { query: QUERIES.nodeRAMUsed } }),
-            axios.get(url, { params: { query: QUERIES.nodeRAMTotal } }),
-            axios.get(url, { params: { query: QUERIES.podRAMUsed } }),
-            axios.get(url, { params: { query: QUERIES.podCPUUsed } }),
-            axios.get(url, { params: { query: QUERIES.podUptime } })
+            fetchKubernetesMetrics()
         ]);
 
         const nodesMap = new Map(); // Key: nodeName, Value: { name, cpuUsagePercent, cores, ramUsedMB, ramTotalMB, pods: [] }
         const servicesMap = new Map(); // Key: "ns:service", Value: { name, namespace, pods: [] }
-        const podMetricsMap = new Map(); // Key: "namespace:podName", Value: { ramUsedMB, cpuUsageCores, uptimeSeconds }
 
-        // Process Node Metrics - collect raw values first
-        const nodeRawMetrics = new Map(); // Key: nodeName, Value: { cpuUsed, cpuTotal, ramUsed, ramTotal }
-
-        const processNodeMetric = (response, field) => {
-            if (response.data.status === 'success') {
-                response.data.data.result.forEach(r => {
-                    let instanceLabel = r.metric.node || r.metric.instance;
-                    if (!instanceLabel) return;
-
-                    // Normalize: strip port suffix (for future node-exporter compatibility)
-                    let nodeName = instanceLabel.replace(/:\d+$/, '');
-
-                    if (!nodeRawMetrics.has(nodeName)) {
-                        nodeRawMetrics.set(nodeName, {
-                            cpuUsed: 0,
-                            cpuTotal: 0,
-                            ramUsed: 0,
-                            ramTotal: 0
-                        });
-                    }
-                    const val = Number.parseFloat(r.value[1]);
-                    if (!Number.isNaN(val)) nodeRawMetrics.get(nodeName)[field] = val;
-                });
-            }
-        };
-
-        processNodeMetric(cpuUsedRes, 'cpuUsed');
-        processNodeMetric(cpuTotalRes, 'cpuTotal');
-        processNodeMetric(ramUsedRes, 'ramUsed');
-        processNodeMetric(ramTotalRes, 'ramTotal');
-
-        // Convert raw metrics to final format
-        nodeRawMetrics.forEach((raw, nodeName) => {
-            const cpuUsagePercent = raw.cpuTotal > 0 ? (raw.cpuUsed / raw.cpuTotal * 100) : 0;
-            const ramUsedMB = raw.ramUsed / (1024 * 1024);
-            const ramTotalMB = raw.ramTotal / (1024 * 1024);
-
-            nodesMap.set(nodeName, {
-                name: nodeName,
-                cpuUsagePercent: Number.parseFloat(cpuUsagePercent.toFixed(2)), // percentage
-                cores: raw.cpuTotal, // count
-                ramUsedMB: Number.parseFloat(ramUsedMB.toFixed(2)), // MB
-                ramTotalMB: Number.parseFloat(ramTotalMB.toFixed(2)), // MB
-                pods: []
-            });
+        // Populate Nodes from K8s Metrics
+        k8sMetrics.nodes.forEach(node => {
+            nodesMap.set(node.name, node);
         });
 
-        // Process Pod Container Metrics
-        const processPodMetric = (response, field, isInt = false) => {
-            if (response.data.status === 'success') {
-                response.data.data.result.forEach(r => {
-                    const podName = r.metric.pod;
-                    const namespace = r.metric.namespace;
-                    if (!podName || !namespace) return;
+        // Use K8s Pod Metrics Map
+        const podMetricsMap = k8sMetrics.podMetrics;
 
-                    const key = `${namespace}:${podName}`;
-                    if (!podMetricsMap.has(key)) {
-                        podMetricsMap.set(key, { ramUsedMB: 0, cpuUsageCores: 0, uptimeSeconds: 0 });
-                    }
-
-                    const val = Number.parseFloat(r.value[1]);
-                    if (!Number.isNaN(val)) {
-                        // Apply specific formatting
-                        if (field === 'ramUsedMB') podMetricsMap.get(key)[field] = Number.parseFloat(val.toFixed(2));
-                        else if (field === 'cpuUsageCores') podMetricsMap.get(key)[field] = Number.parseFloat(val.toFixed(4));
-                        else if (field === 'uptimeSeconds') podMetricsMap.get(key)[field] = Math.floor(val);
-                        else podMetricsMap.get(key)[field] = val;
-                    }
-                });
-            }
-        };
-
-        processPodMetric(podRAMRes, 'ramUsedMB');
-        processPodMetric(podCPURes, 'cpuUsageCores');
-        processPodMetric(podUptimeRes, 'uptimeSeconds');
-
-        // Process Placement
+        // Process Placement (Map Pods to Services and Nodes)
         if (placementRes.data.status === 'success') {
             const results = placementRes.data.data.result;
-            console.log(`DEBUG: fetchInfrastructure found ${results.length} placement records.`);
-
-            if (results.length > 0) {
-                console.log('DEBUG: detailed sample placement:', JSON.stringify(results[0].metric, null, 2));
-            }
 
             results.forEach(r => {
                 const podName = r.metric.pod;
@@ -314,21 +237,23 @@ async function fetchInfrastructure() {
 
                 if (!podName || !serviceName || !namespace) return;
 
-                // Ensure Node exists (if we have nodeName)
+                // Ensure Node exists (even if not in K8s metrics, though unlikely)
                 if (nodeName) {
                     if (!nodesMap.has(nodeName)) {
+                        // Fallback or just init structure if K8s API missed it
                         nodesMap.set(nodeName, {
                             name: nodeName,
                             cpuUsagePercent: 0,
                             cores: 0,
                             ramUsedMB: 0,
                             ramTotalMB: 0,
+                            ramUsagePercent: 0,
                             pods: []
                         });
                     }
-
-                    // Add pod name only (no per-pod metrics available from cAdvisor)
-                    nodesMap.get(nodeName).pods.push(podName);
+                    if (!nodesMap.get(nodeName).pods.includes(podName)) {
+                        nodesMap.get(nodeName).pods.push(podName);
+                    }
                 }
 
                 // Ensure Service exists
@@ -337,25 +262,37 @@ async function fetchInfrastructure() {
                     servicesMap.set(serviceKey, { name: serviceName, namespace, pods: [] });
                 }
 
-                // Get container metrics for this pod
-                const podMetricsKey = `${namespace}:${podName}`;
-                const podMetrics = podMetricsMap.get(podMetricsKey) || { ramUsedMB: 0, cpuUsageCores: 0, uptimeSeconds: 0 };
+                // Get metrics for this pod
+                const key = `${namespace}:${podName}`;
+                const metrics = podMetricsMap.get(key) || {
+                    ramUsedMB: 0,
+                    cpuUsageCores: 0,
+                    cpuUsagePercent: 0,
+                    uptimeSeconds: 0
+                };
 
-                // Add pod to service (with node reference and container metrics)
+                // Calculate uptime from startTime if available
+                let uptimeSeconds = 0;
+                if (metrics.startTime) {
+                    const diff = Date.now() - new Date(metrics.startTime).getTime();
+                    uptimeSeconds = Math.floor(diff / 1000);
+                    if (uptimeSeconds < 0) uptimeSeconds = 0;
+                }
+
+                // Add pod to service
                 servicesMap.get(serviceKey).pods.push({
                     name: podName,
                     node: nodeName,
-                    ramUsedMB: podMetrics.ramUsedMB,
-                    cpuUsageCores: podMetrics.cpuUsageCores,
-                    uptimeSeconds: podMetrics.uptimeSeconds
+                    ramUsedMB: metrics.ramUsedMB,
+                    cpuUsageCores: metrics.cpuUsageCores,
+                    cpuUsagePercent: metrics.cpuUsagePercent,
+                    uptimeSeconds: uptimeSeconds
                 });
             });
         }
 
-        // Log final node metrics
-        nodesMap.forEach((node, name) => {
-            console.log(`  - ${name}: cpu=${node.cpuUsagePercent}% (${node.cores} cores), ram=${node.ramUsedMB}/${node.ramTotalMB} MB, pods=${node.pods.length}`);
-        });
+        // Log confirmation
+        console.log(`Updated infrastructure from K8s API: ${nodesMap.size} nodes, ${servicesMap.size} services.`);
 
         return {
             nodes: Array.from(nodesMap.values()),
