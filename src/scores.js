@@ -1,7 +1,8 @@
 const { driver } = require('./neo4j');
+const config = require('./config');
 
 async function checkGDSAvailability() {
-  const session = driver.session();
+  const session = driver.session({ database: config.neo4j.database });
   try {
     const result = await session.run('CALL gds.version()');
     if (result.records.length > 0) {
@@ -18,7 +19,7 @@ async function checkGDSAvailability() {
 
 async function calculateScores() {
   console.log('Starting Score Calculation Job (GDS)...');
-  const session = driver.session();
+  const session = driver.session({ database: config.neo4j.database });
   const graphName = 'service-call-graph';
 
   try {
