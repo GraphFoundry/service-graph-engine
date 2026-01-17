@@ -132,6 +132,7 @@ SET n.cpuUsagePercent = row.cpuUsagePercent, n.cores = row.cores,
 WITH 1 as dummy
 UNWIND $batchServices AS sRow
 MATCH (s:Service {namespace: sRow.namespace, name: sRow.name})
+SET s.podCount = sRow.podCount, s.availability = sRow.availability, s.updatedAt = datetime()
 FOREACH (pRow IN sRow.pods |
   MERGE (p:Pod {name: pRow.name})
   SET p.ramUsedMB = pRow.ramUsedMB, p.cpuUsageCores = pRow.cpuUsageCores, p.uptimeSeconds = pRow.uptimeSeconds

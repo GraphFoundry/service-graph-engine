@@ -2,31 +2,41 @@ const axios = require('axios');
 const config = require('./config');
 
 /**
- * Fetch Node and Pod metrics from Kubernetes API (stats/summary)
- * Returns { nodes: [], pods: Map<string, PodMetrics> }
+ * Fetch Node and Pod metrics from Kubernetes API
+ * Returns { nodes: [], podMetrics: Map<string, PodMetrics>, services: Map<string, ServiceMetrics> }
  */
 async function fetchKubernetesMetrics() {
     try {
         const baseUrl = config.kubernetes.apiUrl;
 
-        // 1. Get list of nodes
-        const nodesRes = await axios.get(`${baseUrl}/api/v1/nodes`);
+        // Parallel fetch: Nodes list, Node Metrics, and Pod List (cluster-wide)
+        const [nodesRes, podsRes] = await Promise.all([
+            axios.get(`${baseUrl}/api/v1/nodes`),
+            axios.get(`${baseUrl}/api/v1/pods`)
+        ]);
+
         const nodesList = nodesRes.data.items;
+        const podsList = podsRes.data.items;
 
         const nodesMap = new Map();
         const podMetricsMap = new Map(); // Key: "namespace:podName"
+        const servicesMap = new Map();   // Key: "namespace:serviceName"
 
-        // 2. Iterate each node and get stats/summary
-        for (const node of nodesList) {
+        // 1. Process Nodes (Capacity)
+        const nodeCapacities = new Map(); // nodeName -> { cpuTotal, ramTotal }
+        nodesList.forEach(node => {
             const nodeName = node.metadata.name;
             const capacity = node.status.capacity;
-            const allocatable = node.status.allocatable;
-
-            // Parse Capacity (cpu in cores, memory in Ki/Mi/etc)
-            // CPU: "8" -> 8 cores
-            // Memory: "24026408Ki" -> bytes
             const cpuTotalCores = parseCpu(capacity.cpu);
             const ramTotalBytes = parseMemory(capacity.memory);
+            nodeCapacities.set(nodeName, { cpuTotalCores, ramTotalBytes });
+        });
+
+        // 2. Fetch Node Usage Stats & Build Node Map
+        // Iterate sequentially or parallel limit if cluster is large (sequentially for safety here)
+        for (const node of nodesList) {
+            const nodeName = node.metadata.name;
+            const { cpuTotalCores, ramTotalBytes } = nodeCapacities.get(nodeName);
 
             try {
                 // Fetch Summary
@@ -35,13 +45,11 @@ async function fetchKubernetesMetrics() {
                 const nodeStats = summary.node;
 
                 // Node CPU Usage
-                // usageNanoCores: integer formatted string
                 const cpuUsageNano = Number(nodeStats.cpu.usageNanoCores);
                 const cpuUsageCores = cpuUsageNano / 1_000_000_000;
                 const cpuUsagePercent = (cpuUsageCores / cpuTotalCores) * 100;
 
                 // Node Memory Usage
-                // workingSetBytes: integer
                 const ramUsageBytes = Number(nodeStats.memory.workingSetBytes);
                 const ramUsageMB = ramUsageBytes / (1024 * 1024);
                 const ramTotalMB = ramTotalBytes / (1024 * 1024);
@@ -55,22 +63,19 @@ async function fetchKubernetesMetrics() {
                     ramUsedMB: Number(ramUsageMB.toFixed(2)),
                     ramTotalMB: Number(ramTotalMB.toFixed(2)),
                     ramUsagePercent: Number(ramUsagePercent.toFixed(2)),
-                    pods: [] // Populated later by graph engine or here? logic usually in prometheus.js
+                    pods: [] // Populated by pod mapping logic
                 });
 
-                // Pods on this node
+                // Process Pod Stats from Node Summary (Resource Usage)
                 if (summary.pods) {
                     for (const pod of summary.pods) {
                         const podName = pod.podRef.name;
                         const namespace = pod.podRef.namespace;
                         const key = `${namespace}:${podName}`;
 
-                        // Aggregated pod usage (sum of containers usually, but summary has pod-level)
-                        // If pod-level cpu/memory is directly available:
                         let podCpuUsageNano = 0;
                         let podRamUsageBytes = 0;
 
-                        // Check if pod has aggregated stats, else sum containers
                         if (pod.cpu && pod.cpu.usageNanoCores) {
                             podCpuUsageNano = Number(pod.cpu.usageNanoCores);
                         }
@@ -80,10 +85,7 @@ async function fetchKubernetesMetrics() {
 
                         const podCpuUsageCores = podCpuUsageNano / 1_000_000_000;
                         const podRamUsedMB = podRamUsageBytes / (1024 * 1024);
-
-                        // Pod percentage is relative to Node capacity usually, or limit?
-                        // Dashboard expects % of Node usually for visualization
-                        const podCpuUsagePercent = (podCpuUsageCores / cpuTotalCores) * 100;
+                        const podCpuUsagePercent = (podCpuUsageCores / cpuTotalCores) * 100; // % of Node
 
                         podMetricsMap.set(key, {
                             podName,
@@ -91,8 +93,6 @@ async function fetchKubernetesMetrics() {
                             cpuUsageCores: Number(podCpuUsageCores.toFixed(4)),
                             cpuUsagePercent: Number(podCpuUsagePercent.toFixed(2)),
                             ramUsedMB: Number(podRamUsedMB.toFixed(2)),
-                            // Uptime: value available? 
-                            // summary.pods[].startTime is string "2026-01-04T13:34:02Z"
                             startTime: pod.startTime
                         });
                     }
@@ -100,23 +100,79 @@ async function fetchKubernetesMetrics() {
 
             } catch (err) {
                 console.error(`Failed to fetch stats for node ${nodeName}:`, err.message);
-                // Fallback or empty for this node
+                // Fallback: Create node entry with 0 usage if stats fail but node exists
+                nodesMap.set(nodeName, {
+                    name: nodeName,
+                    cpuUsagePercent: 0,
+                    cpuUsed: 0,
+                    cores: cpuTotalCores,
+                    ramUsedMB: 0,
+                    ramTotalMB: Number((ramTotalBytes / 1024 / 1024).toFixed(2)),
+                    ramUsagePercent: 0,
+                    pods: []
+                });
             }
         }
 
+        // 3. Process Pod List (Service Mapping & Availability)
+        // We act as "Service Discovery" here using labels
+        podsList.forEach(pod => {
+            const name = pod.metadata.name;
+            const namespace = pod.metadata.namespace;
+            const nodeName = pod.spec.nodeName;
+            const labels = pod.metadata.labels || {};
+            const serviceName = labels.app; // Convention: 'app' label matches service name
+
+            // Skip pods without 'app' label or not scheduled
+            if (!serviceName || !nodeName) return;
+
+            // Determine Availability (Ready status)
+            let isReady = false;
+            if (pod.status && pod.status.conditions) {
+                const readyCondition = pod.status.conditions.find(c => c.type === 'Ready');
+                if (readyCondition && readyCondition.status === 'True') {
+                    isReady = true;
+                }
+            }
+
+            // Add to Service Map
+            const serviceKey = `${namespace}:${serviceName}`;
+            if (!servicesMap.has(serviceKey)) {
+                servicesMap.set(serviceKey, {
+                    name: serviceName,
+                    namespace,
+                    pods: []
+                });
+            }
+            servicesMap.get(serviceKey).pods.push({
+                name,
+                node: nodeName,
+                isReady
+            });
+
+            // Link Pod to Node (for graph structure)
+            if (nodesMap.has(nodeName)) {
+                if (!nodesMap.get(nodeName).pods.includes(name)) {
+                    nodesMap.get(nodeName).pods.push(name);
+                }
+            }
+        });
+
         return {
             nodes: Array.from(nodesMap.values()),
-            podMetrics: podMetricsMap
+            podMetrics: podMetricsMap,
+            services: servicesMap
         };
 
     } catch (error) {
         console.error('Failed to fetch Kubernetes metrics:', error.message);
-        return { nodes: [], podMetrics: new Map() };
+        return { nodes: [], podMetrics: new Map(), services: new Map() };
     }
 }
 
 // Helpers
 function parseCpu(cpuStr) {
+    if (!cpuStr) return 0;
     if (cpuStr.endsWith('m')) {
         return parseInt(cpuStr) / 1000;
     }
@@ -124,6 +180,7 @@ function parseCpu(cpuStr) {
 }
 
 function parseMemory(memStr) {
+    if (!memStr) return 0;
     const units = {
         'Ki': 1024,
         'Mi': 1024 * 1024,
@@ -136,7 +193,7 @@ function parseMemory(memStr) {
             return parseFloat(memStr) * multiplier;
         }
     }
-    return parseFloat(memStr); // Assume bytes if no unit? or Ki default? K8s usually strict.
+    return parseFloat(memStr);
 }
 
 module.exports = { fetchKubernetesMetrics };
