@@ -377,6 +377,86 @@ app.get('/graph/health', (req, res) => {
  *                   type: string
  *                   example: "Internal Server Error"
  */
+// Infrastructure - Nodes
+/**
+ * @swagger
+ * /infrastructure/nodes:
+ *   get:
+ *     summary: Retrieve all infrastructure nodes and their resource usage
+ *     tags: [Infrastructure]
+ *     responses:
+ *       200:
+ *         description: List of all nodes with CPU and RAM metrics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 nodes:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name:
+ *                         type: string
+ *                         example: "minikube-m02"
+ *                       resources:
+ *                         type: object
+ *                         properties:
+ *                           cpu:
+ *                             type: object
+ *                             properties:
+ *                               usagePercent:
+ *                                 type: number
+ *                               cores:
+ *                                 type: integer
+ *                           ram:
+ *                               type: object
+ *                               properties:
+ *                                 usedMB:
+ *                                   type: number
+ *                                 totalMB:
+ *                                   type: number
+ *       500:
+ *         description: Internal Server Error
+ */
+app.get('/infrastructure/nodes', async (req, res) => {
+    const session = driver.session({ database: config.neo4j.database });
+    try {
+        const query = `
+            MATCH (n:Node)
+            RETURN n.name AS name, 
+                   n.cpuUsagePercent AS cpuUsagePercent, 
+                   n.cores AS cores, 
+                   n.ramUsedMB AS ramUsedMB, 
+                   n.ramTotalMB AS ramTotalMB
+            ORDER BY n.name
+        `;
+
+        const result = await session.run(query);
+        const nodes = result.records.map(record => ({
+            name: record.get('name'),
+            resources: {
+                cpu: {
+                    usagePercent: Number(record.get('cpuUsagePercent') || 0),
+                    cores: Number(record.get('cores') || 0)
+                },
+                ram: {
+                    usedMB: Number(record.get('ramUsedMB') || 0),
+                    totalMB: Number(record.get('ramTotalMB') || 0)
+                }
+            }
+        }));
+
+        res.json({ nodes });
+    } catch (error) {
+        console.error('Error in /infrastructure/nodes:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    } finally {
+        await session.close();
+    }
+});
+
 // Service Discovery
 app.get('/services', async (req, res) => {
     const session = driver.session({ database: config.neo4j.database });

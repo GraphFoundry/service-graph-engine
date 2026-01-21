@@ -207,17 +207,17 @@ async function fetchInfrastructure() {
     try {
         const url = `${config.prometheus.url}/api/v1/query`;
 
-        // 1. Fetch Pod Placement (Graph Structure) from Prometheus/Istio
-        // 2. Fetch Node & Pod Stats from Kubernetes API (Resource Usage)
+        // 1. Fetch Pod Placement (Graph Structure) from Prometheus/Istio (Traffic-based)
+        // 2. Fetch Node & Pod Stats from Kubernetes API (Resource Usage + Ground Truth Service Map)
         const [placementRes, k8sMetrics] = await Promise.all([
             axios.get(url, { params: { query: QUERIES.podPlacement } }),
             fetchKubernetesMetrics()
         ]);
 
         const nodesMap = new Map(); // Key: nodeName, Value: { name, cpuUsagePercent, cores, ramUsedMB, ramTotalMB, pods: [] }
-        const servicesMap = new Map(); // Key: "ns:service", Value: { name, namespace, pods: [] }
+        const servicesMap = new Map(); // Key: "ns:service", Value: { name, namespace, pods: [], availability: ... }
 
-        // Populate Nodes from K8s Metrics
+        // Populate Nodes from K8s Metrics (Ground Truth)
         k8sMetrics.nodes.forEach(node => {
             nodesMap.set(node.name, node);
         });
@@ -225,7 +225,52 @@ async function fetchInfrastructure() {
         // Use K8s Pod Metrics Map
         const podMetricsMap = k8sMetrics.podMetrics;
 
-        // Process Placement (Map Pods to Services and Nodes)
+        // Populate Services from K8s Discovery (Ground Truth)
+        if (k8sMetrics.services) {
+            k8sMetrics.services.forEach((serviceData, key) => {
+                const podDetails = serviceData.pods.map(podInfo => {
+                    const podKey = `${serviceData.namespace}:${podInfo.name}`;
+                    const metrics = podMetricsMap.get(podKey) || {
+                        ramUsedMB: 0,
+                        cpuUsageCores: 0,
+                        cpuUsagePercent: 0,
+                        uptimeSeconds: 0
+                    };
+
+                    // Calculate uptime
+                    let uptimeSeconds = 0;
+                    if (metrics.startTime) {
+                        const diff = Date.now() - new Date(metrics.startTime).getTime();
+                        uptimeSeconds = Math.floor(diff / 1000);
+                        if (uptimeSeconds < 0) uptimeSeconds = 0;
+                    }
+
+                    return {
+                        name: podInfo.name,
+                        node: podInfo.node,
+                        ramUsedMB: metrics.ramUsedMB,
+                        cpuUsageCores: metrics.cpuUsageCores,
+                        cpuUsagePercent: metrics.cpuUsagePercent,
+                        uptimeSeconds: uptimeSeconds,
+                        isReady: podInfo.isReady
+                    };
+                });
+
+                // Determine Infrastructure Availability (At least one pod ready)
+                const availablePodCount = podDetails.filter(p => p.isReady).length;
+                const availability = availablePodCount > 0 ? 1 : 0;
+
+                servicesMap.set(key, {
+                    name: serviceData.name,
+                    namespace: serviceData.namespace,
+                    pods: podDetails,
+                    podCount: podDetails.length,
+                    availability: availability
+                });
+            });
+        }
+
+        // Merge/Enrich with Prometheus Placement (Traffic-based) if we missed anything (unlikely if K8s is source of truth, but good for safety)
         if (placementRes.data.status === 'success') {
             const results = placementRes.data.data.result;
 
@@ -237,57 +282,35 @@ async function fetchInfrastructure() {
 
                 if (!podName || !serviceName || !namespace) return;
 
-                // Ensure Node exists (even if not in K8s metrics, though unlikely)
-                if (nodeName) {
-                    if (!nodesMap.has(nodeName)) {
-                        // Fallback or just init structure if K8s API missed it
-                        nodesMap.set(nodeName, {
-                            name: nodeName,
-                            cpuUsagePercent: 0,
-                            cores: 0,
-                            ramUsedMB: 0,
-                            ramTotalMB: 0,
-                            ramUsagePercent: 0,
-                            pods: []
-                        });
-                    }
-                    if (!nodesMap.get(nodeName).pods.includes(podName)) {
-                        nodesMap.get(nodeName).pods.push(podName);
-                    }
-                }
-
-                // Ensure Service exists
                 const serviceKey = `${namespace}:${serviceName}`;
+
+                // If service wasn't found via K8s labels (e.g. standard labels missing), init it here
                 if (!servicesMap.has(serviceKey)) {
-                    servicesMap.set(serviceKey, { name: serviceName, namespace, pods: [] });
+                    servicesMap.set(serviceKey, {
+                        name: serviceName,
+                        namespace,
+                        pods: [],
+                        podCount: 0,
+                        availability: 0
+                    });
                 }
 
-                // Get metrics for this pod
-                const key = `${namespace}:${podName}`;
-                const metrics = podMetricsMap.get(key) || {
-                    ramUsedMB: 0,
-                    cpuUsageCores: 0,
-                    cpuUsagePercent: 0,
-                    uptimeSeconds: 0
-                };
-
-                // Calculate uptime from startTime if available
-                let uptimeSeconds = 0;
-                if (metrics.startTime) {
-                    const diff = Date.now() - new Date(metrics.startTime).getTime();
-                    uptimeSeconds = Math.floor(diff / 1000);
-                    if (uptimeSeconds < 0) uptimeSeconds = 0;
+                // Check if pod exists in service (avoid dupes)
+                const serviceEntry = servicesMap.get(serviceKey);
+                if (!serviceEntry.pods.find(p => p.name === podName)) {
+                    // We found a pod via traffic that wasn't in K8s list? 
+                    // Add it, but we might lack metrics/readiness
+                    serviceEntry.pods.push({
+                        name: podName,
+                        node: nodeName,
+                        ramUsedMB: 0,
+                        cpuUsageCores: 0,
+                        cpuUsagePercent: 0,
+                        uptimeSeconds: 0,
+                        isReady: false // conservative assumption
+                    });
+                    serviceEntry.podCount++;
                 }
-
-                // Add pod to service
-                servicesMap.get(serviceKey).pods.push({
-                    name: podName,
-                    node: nodeName,
-                    ramUsedMB: metrics.ramUsedMB,
-                    cpuUsageCores: metrics.cpuUsageCores,
-                    cpuUsagePercent: metrics.cpuUsagePercent,
-                    uptimeSeconds: uptimeSeconds
-                });
             });
         }
 
