@@ -4,6 +4,7 @@ const cors = require('cors');
 const config = require('./config');
 const { getLastUpdateTime, driver } = require('./neo4j');
 const { specs, swaggerUi } = require('./swagger');
+const webhook = require('./webhook');
 
 const app = express();
 
@@ -970,6 +971,38 @@ app.get('/centrality/top', async (req, res) => {
     } finally {
         await session.close();
     }
+});
+
+/**
+ * @openapi
+ * /webhooks/status:
+ *   get:
+ *     operationId: getWebhookStatus
+ *     tags:
+ *       - Webhooks
+ *     summary: Get webhook subscriber status
+ *     description: Returns the list of configured webhook subscriber URLs
+ *     responses:
+ *       200:
+ *         description: Webhook status retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 subscribers:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       url:
+ *                         type: string
+ *                         example: "http://analysis-engine:5000/webhook/graph-update"
+ */
+app.get('/webhooks/status', (req, res) => {
+    res.json({
+        subscribers: webhook.getSubscribers()
+    });
 });
 
 function startServer() {
