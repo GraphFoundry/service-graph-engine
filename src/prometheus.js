@@ -205,14 +205,9 @@ const { fetchKubernetesMetrics } = require('./kubernetes');
 
 async function fetchInfrastructure() {
     try {
-        const url = `${config.prometheus.url}/api/v1/query`;
-
-        // 1. Fetch Pod Placement (Graph Structure) from Prometheus/Istio (Traffic-based)
-        // 2. Fetch Node & Pod Stats from Kubernetes API (Resource Usage + Ground Truth Service Map)
-        const [placementRes, k8sMetrics] = await Promise.all([
-            axios.get(url, { params: { query: QUERIES.podPlacement } }),
-            fetchKubernetesMetrics()
-        ]);
+        // Ground truth for infrastructure is Kubernetes (nodes, pods, readiness).
+        // Do not synthesize pod placement from traffic metrics for this view.
+        const k8sMetrics = await fetchKubernetesMetrics();
 
         const nodesMap = new Map(); // Key: nodeName, Value: { name, cpuUsagePercent, cores, ramUsedMB, ramTotalMB, pods: [] }
         const servicesMap = new Map(); // Key: "ns:service", Value: { name, namespace, pods: [], availability: ... }
@@ -267,50 +262,6 @@ async function fetchInfrastructure() {
                     podCount: podDetails.length,
                     availability: availability
                 });
-            });
-        }
-
-        // Merge/Enrich with Prometheus Placement (Traffic-based) if we missed anything (unlikely if K8s is source of truth, but good for safety)
-        if (placementRes.data.status === 'success') {
-            const results = placementRes.data.data.result;
-
-            results.forEach(r => {
-                const podName = r.metric.pod;
-                const nodeName = r.metric.node;
-                const serviceName = r.metric.destination_workload;
-                const namespace = r.metric.destination_workload_namespace;
-
-                if (!podName || !serviceName || !namespace) return;
-
-                const serviceKey = `${namespace}:${serviceName}`;
-
-                // If service wasn't found via K8s labels (e.g. standard labels missing), init it here
-                if (!servicesMap.has(serviceKey)) {
-                    servicesMap.set(serviceKey, {
-                        name: serviceName,
-                        namespace,
-                        pods: [],
-                        podCount: 0,
-                        availability: 0
-                    });
-                }
-
-                // Check if pod exists in service (avoid dupes)
-                const serviceEntry = servicesMap.get(serviceKey);
-                if (!serviceEntry.pods.find(p => p.name === podName)) {
-                    // We found a pod via traffic that wasn't in K8s list? 
-                    // Add it, but we might lack metrics/readiness
-                    serviceEntry.pods.push({
-                        name: podName,
-                        node: nodeName,
-                        ramUsedMB: 0,
-                        cpuUsageCores: 0,
-                        cpuUsagePercent: 0,
-                        uptimeSeconds: 0,
-                        isReady: false // conservative assumption
-                    });
-                    serviceEntry.podCount++;
-                }
             });
         }
 

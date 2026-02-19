@@ -129,10 +129,15 @@ SET n.cpuUsagePercent = row.cpuUsagePercent, n.cores = row.cores,
     n.ramUsedMB = row.ramUsedMB, n.ramTotalMB = row.ramTotalMB, 
     n.updatedAt = datetime()
 
-WITH 1 as dummy
+WITH $batchServices AS batchServices
 UNWIND $batchServices AS sRow
 MATCH (s:Service {namespace: sRow.namespace, name: sRow.name})
 SET s.podCount = sRow.podCount, s.availability = sRow.availability, s.updatedAt = datetime()
+WITH batchServices, s, sRow, [pRow IN sRow.pods | pRow.name] AS currentPodNames
+OPTIONAL MATCH (s)-[stalePodRel:HAS_POD]->(p:Pod)
+WHERE NOT p.name IN currentPodNames
+DELETE stalePodRel
+WITH batchServices, s, sRow
 FOREACH (pRow IN sRow.pods |
   MERGE (p:Pod {name: pRow.name})
   SET p.ramUsedMB = pRow.ramUsedMB, p.cpuUsageCores = pRow.cpuUsageCores, p.uptimeSeconds = pRow.uptimeSeconds
@@ -140,6 +145,15 @@ FOREACH (pRow IN sRow.pods |
   MERGE (n:Node {name: pRow.node})
   MERGE (p)-[:RUNS_ON]->(n)
 )
+
+WITH [row IN batchServices | row.namespace] AS activeNamespaces,
+     [row IN batchServices | (row.namespace + ":" + row.name)] AS activeServiceIds
+MATCH (s:Service)
+WHERE s.namespace IN activeNamespaces AND NOT (s.namespace + ":" + s.name) IN activeServiceIds
+SET s.podCount = 0, s.availability = 0, s.updatedAt = datetime()
+WITH s
+OPTIONAL MATCH (s)-[stalePodRel:HAS_POD]->(:Pod)
+DELETE stalePodRel
 `;
 
 async function updateInfrastructure(data) {
