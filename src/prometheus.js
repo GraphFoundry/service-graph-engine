@@ -1,17 +1,25 @@
 const axios = require('axios');
 const config = require('./config');
 
-// Helper to construct the BY clause
-const BY_CLAUSE = 'by (source_workload, source_workload_namespace, destination_workload, destination_workload_namespace)';
+// Keep destination identity stable even when workload label becomes "unknown" during outages.
+const DEST_NAME_LABEL = 'destination_service_name';
+const DEST_NS_LABEL = 'destination_service_namespace';
+const BY_CLAUSE = `by (source_workload, source_workload_namespace, ${DEST_NAME_LABEL}, ${DEST_NS_LABEL})`;
 
 const QUERIES = {
     rps: `sum(rate(istio_requests_total[${config.prometheus.queryWindow}])) ${BY_CLAUSE}`,
-    errorRate: `sum(rate(istio_requests_total{response_code=~"5.."}[${config.prometheus.queryWindow}])) ${BY_CLAUSE}`,
+    // Use `or` union before aggregation so missing 5xx/non-5xx branches contribute 0
+    // instead of dropping the whole vector during arithmetic.
+    errorRate: `sum(
+      rate(istio_requests_total{response_code=~"5.."}[${config.prometheus.queryWindow}])
+      or
+      rate(istio_requests_total{response_code!~"5..", grpc_response_status=~".+", grpc_response_status!~"0"}[${config.prometheus.queryWindow}])
+    ) ${BY_CLAUSE} / clamp_min(sum(rate(istio_requests_total[${config.prometheus.queryWindow}])) ${BY_CLAUSE}, 1e-9)`,
     p50: `histogram_quantile(0.50, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
     p95: `histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
     p99: `histogram_quantile(0.99, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
-    availability: `sum(rate(istio_requests_total{reporter="destination", response_code!~"5.*"}[15m])) by (destination_workload, destination_workload_namespace) / sum(rate(istio_requests_total{reporter="destination"}[15m])) by (destination_workload, destination_workload_namespace)`,
-    podCount: `count(sum(rate(istio_requests_total{reporter="destination"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace, instance)) by (destination_workload, destination_workload_namespace)`,
+    availability: `sum(rate(istio_requests_total{reporter="destination", response_code!~"5.*"}[15m])) by (${DEST_NAME_LABEL}, ${DEST_NS_LABEL}) / sum(rate(istio_requests_total{reporter="destination"}[15m])) by (${DEST_NAME_LABEL}, ${DEST_NS_LABEL})`,
+    podCount: `count(sum(rate(istio_requests_total{reporter="destination"}[${config.prometheus.queryWindow}])) by (${DEST_NAME_LABEL}, ${DEST_NS_LABEL}, instance)) by (${DEST_NAME_LABEL}, ${DEST_NS_LABEL})`,
     // Use istio metrics to get pod and node information - labels are 'pod' and 'node'
     podPlacement: `count(istio_requests_total{reporter="destination"}) by (pod, node, destination_workload, destination_workload_namespace)`,
     // Node Resource Queries using cAdvisor metrics (exposed by kubelet, no node-exporter needed)
@@ -34,8 +42,8 @@ async function fetchPrometheusFiles() {
     // Helper to store node metrics
     const storeNodeMetric = (name, results) => {
         results.forEach(result => {
-            const workload = result.metric.destination_workload;
-            const ns = result.metric.destination_workload_namespace;
+            const workload = getDestinationName(result.metric);
+            const ns = getDestinationNamespace(result.metric);
             if (!workload || workload === 'unknown' || !ns || ns === 'unknown') return;
 
             const id = `${ns}:${workload}`;
@@ -83,8 +91,8 @@ async function fetchPrometheusFiles() {
             results.forEach(result => {
                 const sourceName = result.metric.source_workload;
                 const sourceNs = result.metric.source_workload_namespace;
-                const destName = result.metric.destination_workload;
-                const destNs = result.metric.destination_workload_namespace;
+                const destName = getDestinationName(result.metric);
+                const destNs = getDestinationNamespace(result.metric);
 
                 // Normalization: Ignore unknown or empty workloads
                 if (!sourceName || sourceName === 'unknown' || !destName || destName === 'unknown') {
@@ -280,3 +288,19 @@ async function fetchInfrastructure() {
 }
 
 module.exports = { fetchPrometheusFiles, fetchPodPlacement, fetchInfrastructure };
+
+function getDestinationName(metric) {
+    const workload = metric.destination_workload;
+    if (workload && workload !== 'unknown') {
+        return workload;
+    }
+    return metric.destination_service_name;
+}
+
+function getDestinationNamespace(metric) {
+    const ns = metric.destination_workload_namespace;
+    if (ns && ns !== 'unknown') {
+        return ns;
+    }
+    return metric.destination_service_namespace;
+}
