@@ -1001,7 +1001,8 @@ app.get('/centrality/top', async (req, res) => {
  */
 app.get('/webhooks/status', (req, res) => {
     res.json({
-        subscribers: webhook.getSubscribers()
+        subscribers: webhook.getSubscribers(),
+        stats: webhook.getStats ? webhook.getStats() : undefined
     });
 });
 
