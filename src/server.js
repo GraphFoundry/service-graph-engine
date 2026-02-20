@@ -4,6 +4,7 @@ const cors = require('cors');
 const config = require('./config');
 const { getLastUpdateTime, driver } = require('./neo4j');
 const { specs, swaggerUi } = require('./swagger');
+const webhook = require('./webhook');
 
 const app = express();
 
@@ -377,6 +378,86 @@ app.get('/graph/health', (req, res) => {
  *                   type: string
  *                   example: "Internal Server Error"
  */
+// Infrastructure - Nodes
+/**
+ * @swagger
+ * /infrastructure/nodes:
+ *   get:
+ *     summary: Retrieve all infrastructure nodes and their resource usage
+ *     tags: [Infrastructure]
+ *     responses:
+ *       200:
+ *         description: List of all nodes with CPU and RAM metrics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 nodes:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name:
+ *                         type: string
+ *                         example: "minikube-m02"
+ *                       resources:
+ *                         type: object
+ *                         properties:
+ *                           cpu:
+ *                             type: object
+ *                             properties:
+ *                               usagePercent:
+ *                                 type: number
+ *                               cores:
+ *                                 type: integer
+ *                           ram:
+ *                               type: object
+ *                               properties:
+ *                                 usedMB:
+ *                                   type: number
+ *                                 totalMB:
+ *                                   type: number
+ *       500:
+ *         description: Internal Server Error
+ */
+app.get('/infrastructure/nodes', async (req, res) => {
+    const session = driver.session({ database: config.neo4j.database });
+    try {
+        const query = `
+            MATCH (n:Node)
+            RETURN n.name AS name, 
+                   n.cpuUsagePercent AS cpuUsagePercent, 
+                   n.cores AS cores, 
+                   n.ramUsedMB AS ramUsedMB, 
+                   n.ramTotalMB AS ramTotalMB
+            ORDER BY n.name
+        `;
+
+        const result = await session.run(query);
+        const nodes = result.records.map(record => ({
+            name: record.get('name'),
+            resources: {
+                cpu: {
+                    usagePercent: Number(record.get('cpuUsagePercent') || 0),
+                    cores: Number(record.get('cores') || 0)
+                },
+                ram: {
+                    usedMB: Number(record.get('ramUsedMB') || 0),
+                    totalMB: Number(record.get('ramTotalMB') || 0)
+                }
+            }
+        }));
+
+        res.json({ nodes });
+    } catch (error) {
+        console.error('Error in /infrastructure/nodes:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    } finally {
+        await session.close();
+    }
+});
+
 // Service Discovery
 app.get('/services', async (req, res) => {
     const session = driver.session({ database: config.neo4j.database });
@@ -671,64 +752,150 @@ app.get('/services/:service/peers', async (req, res) => {
 // Dependency Queries - Neighborhood
 app.get('/services/:service/neighborhood', async (req, res) => {
     const { service } = req.params;
-    const k = parseInt(req.query.k) || 1;
+    const k = Math.min(Math.max(parseInt(req.query.k, 10) || 2, 1), 3);
+    const direction = (req.query.direction || 'both').toString().toLowerCase();
+    const maxNodes = Math.min(Math.max(parseInt(req.query.maxNodes, 10) || 200, 10), 500);
+    const maxEdges = Math.min(Math.max(parseInt(req.query.maxEdges, 10) || 400, 10), 1000);
+
+    if (!['both', 'in', 'out'].includes(direction)) {
+        return res.status(400).json({ error: 'direction must be one of: both, in, out' });
+    }
+
     const session = driver.session({ database: config.neo4j.database });
 
     try {
-        // Pure Cypher approach for small k
-        const query = `
-            MATCH p = (center:Service {name: $service})-[*1..${k}]-(m)
-            UNWIND relationships(p) as r
-            UNWIND nodes(p) as n
-            RETURN collect(distinct {name: n.name, namespace: n.namespace, podCount: n.podCount, availability: n.availability}) as nodes, 
-                   collect(distinct {from: startNode(r).name, to: endNode(r).name, rate: r.rate, p50: r.p50, p95: r.p95, p99: r.p99, errorRate: r.errorRate}) as edges
+        const centerResult = await session.run(
+            `
+                MATCH (center:Service)
+                WHERE center.serviceId = $service OR center.name = $service
+                RETURN center.serviceId AS serviceId,
+                       center.name AS name,
+                       center.namespace AS namespace,
+                       center.podCount AS podCount,
+                       center.availability AS availability
+                LIMIT 1
+            `,
+            { service }
+        );
+
+        if (centerResult.records.length === 0) {
+            return res.status(404).json({ error: `Service not found: ${service}` });
+        }
+
+        const centerRecord = centerResult.records[0];
+        const centerRef = {
+            serviceId: centerRecord.get('serviceId'),
+            name: centerRecord.get('name'),
+            namespace: centerRecord.get('namespace'),
+            podCount: Math.floor(Number(centerRecord.get('podCount') || 0)),
+            availability: Number(centerRecord.get('availability') || 0),
+        };
+
+        let pattern = `(center)-[*1..${k}]-(m)`;
+        if (direction === 'in') {
+            pattern = `(m)-[*1..${k}]->(center)`;
+        } else if (direction === 'out') {
+            pattern = `(center)-[*1..${k}]->(m)`;
+        }
+
+        const neighborhoodQuery = `
+            MATCH (center:Service {serviceId: $centerId})
+            OPTIONAL MATCH p = ${pattern}
+            WITH center, collect(p) AS paths
+            WITH center, CASE WHEN size(paths) = 0 THEN [NULL] ELSE paths END AS safePaths
+            UNWIND safePaths AS path
+            WITH center, CASE WHEN path IS NULL THEN [] ELSE relationships(path) END AS relList
+            UNWIND CASE WHEN size(relList) = 0 THEN [NULL] ELSE relList END AS rel
+            WITH center, collect(DISTINCT rel) AS relsRaw
+            WITH center, [r IN relsRaw WHERE r IS NOT NULL] AS rels
+            WITH center, rels,
+                 CASE
+                    WHEN size(rels) = 0 THEN [center]
+                    ELSE [center] + [r IN rels | startNode(r)] + [r IN rels | endNode(r)]
+                 END AS rawNodes
+            UNWIND rawNodes AS node
+            WITH center, rels, collect(DISTINCT node) AS nodes
+            RETURN
+                [n IN nodes | {
+                    serviceId: n.serviceId,
+                    name: n.name,
+                    namespace: n.namespace,
+                    podCount: n.podCount,
+                    availability: n.availability
+                }] AS nodes,
+                [r IN rels | {
+                    source: startNode(r).serviceId,
+                    target: endNode(r).serviceId,
+                    from: startNode(r).name,
+                    to: endNode(r).name,
+                    rate: r.rate,
+                    p50: r.p50,
+                    p95: r.p95,
+                    p99: r.p99,
+                    errorRate: r.errorRate
+                }] AS edges
         `;
 
-        const result = await session.run(query, { service });
+        const result = await session.run(neighborhoodQuery, { centerId: centerRef.serviceId });
 
         let nodes = [];
         let edges = [];
-
         if (result.records.length > 0) {
-            nodes = result.records[0].get('nodes').map(node => ({
-                ...node,
-                podCount: Math.floor(Number(node.podCount || 0)),
-                availability: Number(node.availability || 0)
-            }));
-            edges = result.records[0].get('edges');
-        } else {
-            // Handle case where service exists but has no neighbors or doesn't exist?
-            // If service doesn't exist, we should probably check.
-            // But for now, let's assume if no paths, we verify if center exists.
-            // Simplified: just return what we found (empty if nothing).
-            // If center exists but no edges, query might return empty?
-            // With MATCH p = ... it requires at least one pattern match.
-            // So if isolated, it returns nothing.
-            // To handle isolated center:
-            const centerCheck = await session.run('MATCH (s:Service {name: $service}) RETURN s.name, s.namespace, s.podCount, s.availability');
-            if (centerCheck.records.length > 0) {
-                const record = centerCheck.records[0];
-                nodes = [{
-                    name: record.get('name'),
-                    namespace: record.get('namespace'),
-                    podCount: Math.floor(Number(record.get('podCount') || 0)),
-                    availability: Number(record.get('availability') || 0)
-                }];
-            }
+            nodes = (result.records[0].get('nodes') || [])
+                .filter(Boolean)
+                .map((node) => ({
+                    serviceId: node.serviceId || `${node.namespace || 'default'}:${node.name}`,
+                    name: node.name,
+                    namespace: node.namespace || 'default',
+                    podCount: Math.floor(Number(node.podCount || 0)),
+                    availability: Number(node.availability || 0),
+                }));
+            edges = (result.records[0].get('edges') || [])
+                .filter(Boolean)
+                .map((edge) => ({
+                    source: edge.source || `default:${edge.from}`,
+                    target: edge.target || `default:${edge.to}`,
+                    from: edge.from,
+                    to: edge.to,
+                    rate: Number(edge.rate || 0),
+                    p50: Number(edge.p50 || 0),
+                    p95: Number(edge.p95 || 0),
+                    p99: Number(edge.p99 || 0),
+                    errorRate: Number(edge.errorRate || 0),
+                }));
         }
 
-        // De-duplicate edges based on content if needed, but COLLECT(DISTINCT ...) should handle object equality if identical.
-        // However, Neo4j map equality considers key order? usually fine.
+        const centerInNodes = nodes.some((node) => node.serviceId === centerRef.serviceId);
+        if (!centerInNodes) {
+            nodes.unshift({
+                serviceId: centerRef.serviceId,
+                name: centerRef.name,
+                namespace: centerRef.namespace || 'default',
+                podCount: centerRef.podCount,
+                availability: centerRef.availability,
+            });
+        }
 
-        // Filter out nulls if any
-        nodes = nodes.filter(n => n);
-        edges = edges.filter(e => e);
+        const truncated = nodes.length > maxNodes || edges.length > maxEdges;
+        if (nodes.length > maxNodes) {
+            nodes = nodes.slice(0, maxNodes);
+        }
+        if (edges.length > maxEdges) {
+            edges = edges.slice(0, maxEdges);
+        }
 
         res.json({
-            center: service,
+            center: centerRef.serviceId,
+            centerRef: {
+                serviceId: centerRef.serviceId,
+                name: centerRef.name,
+                namespace: centerRef.namespace || 'default',
+            },
             k,
+            direction,
+            truncated,
             nodes,
-            edges
+            edges,
         });
     } catch (error) {
         console.error('Error in /services/:service/neighborhood:', error);
@@ -890,6 +1057,39 @@ app.get('/centrality/top', async (req, res) => {
     } finally {
         await session.close();
     }
+});
+
+/**
+ * @openapi
+ * /webhooks/status:
+ *   get:
+ *     operationId: getWebhookStatus
+ *     tags:
+ *       - Webhooks
+ *     summary: Get webhook subscriber status
+ *     description: Returns the list of configured webhook subscriber URLs
+ *     responses:
+ *       200:
+ *         description: Webhook status retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 subscribers:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       url:
+ *                         type: string
+ *                         example: "http://analysis-engine:5000/webhook/graph-update"
+ */
+app.get('/webhooks/status', (req, res) => {
+    res.json({
+        subscribers: webhook.getSubscribers(),
+        stats: webhook.getStats ? webhook.getStats() : undefined
+    });
 });
 
 function startServer() {

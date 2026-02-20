@@ -1,8 +1,9 @@
 const config = require('./src/config');
 const { fetchPrometheusFiles, fetchInfrastructure } = require('./src/prometheus');
-const { updateGraph, updateInfrastructure, closeDriver, initSchema } = require('./src/neo4j');
+const { updateGraph, updateInfrastructure, closeDriver, initSchema, driver, getLastUpdateTime } = require('./src/neo4j');
 const { checkGDSAvailability, calculateScores } = require('./src/scores_local');
 const { startServer } = require('./src/server');
+const webhook = require('./src/webhook');
 
 async function runSync() {
     console.log(`[${new Date().toISOString()}] Starting sync cycle...`);
@@ -19,8 +20,206 @@ async function runSync() {
         if (infra && infra.nodes.length > 0) {
             await updateInfrastructure(infra);
         }
+
+        // Push update to webhook subscribers after successful sync
+        await pushWebhookUpdate(infra);
     } catch (error) {
         console.error('Error during sync cycle:', error);
+    }
+}
+
+/**
+ * Build and push the latest snapshot to all webhook subscribers.
+ * This replaces the need for consumers to poll /metrics/snapshot and /services.
+ */
+async function pushWebhookUpdate(infra) {
+    try {
+        const session = driver.session({ database: config.neo4j.database });
+        try {
+            const lastUpdate = getLastUpdateTime();
+            if (!lastUpdate) return;
+
+            // Query metrics snapshot (same logic as GET /metrics/snapshot)
+            const edgeQuery = `
+                MATCH (a:Service)-[r:CALLS_NOW]->(b:Service)
+                RETURN a.name AS fromName, a.namespace AS fromNs,
+                       a.podCount AS fromPodCount, a.availability AS fromAvailability,
+                       b.name AS toName, b.namespace AS toNs,
+                       b.podCount AS toPodCount, b.availability AS toAvailability,
+                       r.rate AS rps, r.errorRate AS errorRate, r.p95 AS p95
+            `;
+            const edgeResult = await session.run(edgeQuery);
+
+            const edges = [];
+            const serviceMetrics = new Map();
+
+            edgeResult.records.forEach(record => {
+                const fromName = record.get('fromName');
+                const fromNs = record.get('fromNs');
+                const fromPodCount = record.get('fromPodCount');
+                const fromAvailability = record.get('fromAvailability');
+                const toName = record.get('toName');
+                const toNs = record.get('toNs');
+                const toPodCount = record.get('toPodCount');
+                const toAvailability = record.get('toAvailability');
+                const rps = record.get('rps') || 0;
+                const errorRate = record.get('errorRate') || 0;
+                const p95 = record.get('p95') || 0;
+
+                edges.push({
+                    from: fromName,
+                    to: toName,
+                    namespace: toNs,
+                    rps: parseFloat(rps.toFixed ? rps.toFixed(2) : rps),
+                    errorRate: parseFloat(errorRate.toFixed ? errorRate.toFixed(4) : errorRate),
+                    p95: parseFloat(p95.toFixed ? p95.toFixed(2) : p95)
+                });
+
+                const fromKey = `${fromNs}:${fromName}`;
+                if (!serviceMetrics.has(fromKey)) {
+                    serviceMetrics.set(fromKey, { name: fromName, namespace: fromNs, totalRps: 0, totalErrors: 0, maxP95: 0, podCount: fromPodCount, availability: fromAvailability });
+                }
+                const fm = serviceMetrics.get(fromKey);
+                fm.totalRps += rps;
+                fm.totalErrors += rps * errorRate;
+                fm.maxP95 = Math.max(fm.maxP95, p95);
+
+                const toKey = `${toNs}:${toName}`;
+                if (!serviceMetrics.has(toKey)) {
+                    serviceMetrics.set(toKey, { name: toName, namespace: toNs, totalRps: 0, totalErrors: 0, maxP95: 0, podCount: toPodCount, availability: toAvailability });
+                }
+                const tm = serviceMetrics.get(toKey);
+                tm.totalRps += rps;
+                tm.totalErrors += rps * errorRate;
+                tm.maxP95 = Math.max(tm.maxP95, p95);
+            });
+
+            const services = Array.from(serviceMetrics.values()).map(m => ({
+                name: m.name,
+                namespace: m.namespace,
+                rps: parseFloat(m.totalRps.toFixed(2)),
+                errorRate: m.totalRps > 0 ? parseFloat((m.totalErrors / m.totalRps).toFixed(4)) : 0,
+                p95: parseFloat(m.maxP95.toFixed(2)),
+                podCount: m.podCount || 0,
+                availability: m.availability || 0
+            }));
+
+            const metricsSnapshot = {
+                timestamp: new Date(lastUpdate).toISOString(),
+                window: config.prometheus.queryWindow,
+                services,
+                edges
+            };
+
+            // Query services with placement (same logic as GET /services)
+            const svcQuery = `
+                MATCH (s:Service)
+                OPTIONAL MATCH (s)-[:HAS_POD]->(p:Pod)-[:RUNS_ON]->(n:Node)
+                RETURN s.name AS name, s.namespace AS namespace,
+                       s.podCount AS podCount, s.availability AS availability,
+                       collect(DISTINCT {
+                           node: n.name,
+                           podName: p.name,
+                           podRam: p.ramUsedMB,
+                           podCpu: p.cpuUsageCores,
+                           podUptime: p.uptimeSeconds,
+                           nodeCpuPercent: n.cpuUsagePercent,
+                           nodeCores: n.cores,
+                           nodeRamUsed: n.ramUsedMB,
+                           nodeRamTotal: n.ramTotalMB
+                       }) AS placements
+            `;
+            const svcResult = await session.run(svcQuery);
+
+            const servicesWithPlacement = svcResult.records.map(record => {
+                const name = record.get('name');
+                const namespace = record.get('namespace');
+                const podCount = record.get('podCount') || 0;
+                const availability = record.get('availability') || 0;
+                const placements = record.get('placements') || [];
+
+                const nodesMap = new Map();
+                placements.forEach(p => {
+                    if (!p.node) return;
+                    if (!nodesMap.has(p.node)) {
+                        nodesMap.set(p.node, {
+                            node: p.node,
+                            resources: {
+                                cpu: { usagePercent: p.nodeCpuPercent || 0, cores: p.nodeCores || 0 },
+                                ram: { usedMB: p.nodeRamUsed || 0, totalMB: p.nodeRamTotal || 0 }
+                            },
+                            pods: []
+                        });
+                    }
+                    if (p.podName) {
+                        nodesMap.get(p.node).pods.push({
+                            name: p.podName,
+                            ramUsedMB: p.podRam || 0,
+                            cpuUsagePercent: p.podCpu || 0,
+                            uptimeSeconds: p.podUptime || 0
+                        });
+                    }
+                });
+
+                return {
+                    name,
+                    namespace,
+                    podCount,
+                    availability,
+                    placement: { nodes: Array.from(nodesMap.values()) }
+                };
+            });
+
+            // Query centrality scores
+            let centralityScores = [];
+            try {
+                const centralityQuery = `
+                    MATCH (s:Service)
+                    WHERE s.pagerank IS NOT NULL
+                    RETURN s.name AS service, s.pagerank AS pagerank, 
+                           coalesce(s.betweenness, 0) AS betweenness
+                `;
+                const centralityResult = await session.run(centralityQuery);
+                centralityScores = centralityResult.records.map(r => ({
+                    service: r.get('service'),
+                    pagerank: r.get('pagerank') || 0,
+                    betweenness: r.get('betweenness') || 0
+                }));
+            } catch (err) {
+                console.log('[Webhook] Centrality scores not available:', err.message);
+            }
+
+            // Query nodes
+            let nodes = [];
+            try {
+                const nodesQuery = `
+                    MATCH (n:Node)
+                    RETURN n.name AS name, n.cpuUsagePercent AS cpuUsagePercent,
+                           n.cores AS cores, n.ramUsedMB AS ramUsedMB, n.ramTotalMB AS ramTotalMB
+                `;
+                const nodesResult = await session.run(nodesQuery);
+                nodes = nodesResult.records.map(r => ({
+                    name: r.get('name'),
+                    resources: {
+                        cpu: { usagePercent: r.get('cpuUsagePercent') || 0, cores: r.get('cores') || 0 },
+                        ram: { usedMB: r.get('ramUsedMB') || 0, totalMB: r.get('ramTotalMB') || 0 }
+                    }
+                }));
+            } catch (err) {
+                console.log('[Webhook] Node data not available:', err.message);
+            }
+
+            await webhook.notifySubscribers({
+                metricsSnapshot,
+                services: servicesWithPlacement,
+                infrastructure: { nodes },
+                centrality: { scores: centralityScores }
+            });
+        } finally {
+            await session.close();
+        }
+    } catch (error) {
+        console.error('[Webhook] Failed to push update:', error.message);
     }
 }
 
@@ -29,6 +228,9 @@ async function startService() {
 
     // Initialize Schema
     await initSchema();
+
+    // Initialize Webhook subscribers
+    webhook.init();
 
     // Check GDS Availability
     await checkGDSAvailability();

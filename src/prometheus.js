@@ -1,17 +1,25 @@
 const axios = require('axios');
 const config = require('./config');
 
-// Helper to construct the BY clause
-const BY_CLAUSE = 'by (source_workload, source_workload_namespace, destination_workload, destination_workload_namespace)';
+// Keep destination identity stable even when workload label becomes "unknown" during outages.
+const DEST_NAME_LABEL = 'destination_service_name';
+const DEST_NS_LABEL = 'destination_service_namespace';
+const BY_CLAUSE = `by (source_workload, source_workload_namespace, ${DEST_NAME_LABEL}, ${DEST_NS_LABEL})`;
 
 const QUERIES = {
     rps: `sum(rate(istio_requests_total[${config.prometheus.queryWindow}])) ${BY_CLAUSE}`,
-    errorRate: `sum(rate(istio_requests_total{response_code=~"5.."}[${config.prometheus.queryWindow}])) ${BY_CLAUSE}`,
+    // Use `or` union before aggregation so missing 5xx/non-5xx branches contribute 0
+    // instead of dropping the whole vector during arithmetic.
+    errorRate: `sum(
+      rate(istio_requests_total{response_code=~"5.."}[${config.prometheus.queryWindow}])
+      or
+      rate(istio_requests_total{response_code!~"5..", grpc_response_status=~".+", grpc_response_status!~"0"}[${config.prometheus.queryWindow}])
+    ) ${BY_CLAUSE} / clamp_min(sum(rate(istio_requests_total[${config.prometheus.queryWindow}])) ${BY_CLAUSE}, 1e-9)`,
     p50: `histogram_quantile(0.50, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
     p95: `histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
     p99: `histogram_quantile(0.99, sum(rate(istio_request_duration_milliseconds_bucket[${config.prometheus.queryWindow}])) by (le, source_workload, source_workload_namespace, destination_workload, destination_workload_namespace))`,
-    availability: `sum(rate(istio_requests_total{reporter="destination", response_code!~"5.*"}[15m])) by (destination_workload, destination_workload_namespace) / sum(rate(istio_requests_total{reporter="destination"}[15m])) by (destination_workload, destination_workload_namespace)`,
-    podCount: `count(sum(rate(istio_requests_total{reporter="destination"}[${config.prometheus.queryWindow}])) by (destination_workload, destination_workload_namespace, instance)) by (destination_workload, destination_workload_namespace)`,
+    availability: `sum(rate(istio_requests_total{reporter="destination", response_code!~"5.*"}[15m])) by (${DEST_NAME_LABEL}, ${DEST_NS_LABEL}) / sum(rate(istio_requests_total{reporter="destination"}[15m])) by (${DEST_NAME_LABEL}, ${DEST_NS_LABEL})`,
+    podCount: `count(sum(rate(istio_requests_total{reporter="destination"}[${config.prometheus.queryWindow}])) by (${DEST_NAME_LABEL}, ${DEST_NS_LABEL}, instance)) by (${DEST_NAME_LABEL}, ${DEST_NS_LABEL})`,
     // Use istio metrics to get pod and node information - labels are 'pod' and 'node'
     podPlacement: `count(istio_requests_total{reporter="destination"}) by (pod, node, destination_workload, destination_workload_namespace)`,
     // Node Resource Queries using cAdvisor metrics (exposed by kubelet, no node-exporter needed)
@@ -34,8 +42,8 @@ async function fetchPrometheusFiles() {
     // Helper to store node metrics
     const storeNodeMetric = (name, results) => {
         results.forEach(result => {
-            const workload = result.metric.destination_workload;
-            const ns = result.metric.destination_workload_namespace;
+            const workload = getDestinationName(result.metric);
+            const ns = getDestinationNamespace(result.metric);
             if (!workload || workload === 'unknown' || !ns || ns === 'unknown') return;
 
             const id = `${ns}:${workload}`;
@@ -83,8 +91,8 @@ async function fetchPrometheusFiles() {
             results.forEach(result => {
                 const sourceName = result.metric.source_workload;
                 const sourceNs = result.metric.source_workload_namespace;
-                const destName = result.metric.destination_workload;
-                const destNs = result.metric.destination_workload_namespace;
+                const destName = getDestinationName(result.metric);
+                const destNs = getDestinationNamespace(result.metric);
 
                 // Normalization: Ignore unknown or empty workloads
                 if (!sourceName || sourceName === 'unknown' || !destName || destName === 'unknown') {
@@ -205,19 +213,14 @@ const { fetchKubernetesMetrics } = require('./kubernetes');
 
 async function fetchInfrastructure() {
     try {
-        const url = `${config.prometheus.url}/api/v1/query`;
-
-        // 1. Fetch Pod Placement (Graph Structure) from Prometheus/Istio
-        // 2. Fetch Node & Pod Stats from Kubernetes API (Resource Usage)
-        const [placementRes, k8sMetrics] = await Promise.all([
-            axios.get(url, { params: { query: QUERIES.podPlacement } }),
-            fetchKubernetesMetrics()
-        ]);
+        // Ground truth for infrastructure is Kubernetes (nodes, pods, readiness).
+        // Do not synthesize pod placement from traffic metrics for this view.
+        const k8sMetrics = await fetchKubernetesMetrics();
 
         const nodesMap = new Map(); // Key: nodeName, Value: { name, cpuUsagePercent, cores, ramUsedMB, ramTotalMB, pods: [] }
-        const servicesMap = new Map(); // Key: "ns:service", Value: { name, namespace, pods: [] }
+        const servicesMap = new Map(); // Key: "ns:service", Value: { name, namespace, pods: [], availability: ... }
 
-        // Populate Nodes from K8s Metrics
+        // Populate Nodes from K8s Metrics (Ground Truth)
         k8sMetrics.nodes.forEach(node => {
             nodesMap.set(node.name, node);
         });
@@ -225,68 +228,47 @@ async function fetchInfrastructure() {
         // Use K8s Pod Metrics Map
         const podMetricsMap = k8sMetrics.podMetrics;
 
-        // Process Placement (Map Pods to Services and Nodes)
-        if (placementRes.data.status === 'success') {
-            const results = placementRes.data.data.result;
+        // Populate Services from K8s Discovery (Ground Truth)
+        if (k8sMetrics.services) {
+            k8sMetrics.services.forEach((serviceData, key) => {
+                const podDetails = serviceData.pods.map(podInfo => {
+                    const podKey = `${serviceData.namespace}:${podInfo.name}`;
+                    const metrics = podMetricsMap.get(podKey) || {
+                        ramUsedMB: 0,
+                        cpuUsageCores: 0,
+                        cpuUsagePercent: 0,
+                        uptimeSeconds: 0
+                    };
 
-            results.forEach(r => {
-                const podName = r.metric.pod;
-                const nodeName = r.metric.node;
-                const serviceName = r.metric.destination_workload;
-                const namespace = r.metric.destination_workload_namespace;
-
-                if (!podName || !serviceName || !namespace) return;
-
-                // Ensure Node exists (even if not in K8s metrics, though unlikely)
-                if (nodeName) {
-                    if (!nodesMap.has(nodeName)) {
-                        // Fallback or just init structure if K8s API missed it
-                        nodesMap.set(nodeName, {
-                            name: nodeName,
-                            cpuUsagePercent: 0,
-                            cores: 0,
-                            ramUsedMB: 0,
-                            ramTotalMB: 0,
-                            ramUsagePercent: 0,
-                            pods: []
-                        });
+                    // Calculate uptime
+                    let uptimeSeconds = 0;
+                    if (metrics.startTime) {
+                        const diff = Date.now() - new Date(metrics.startTime).getTime();
+                        uptimeSeconds = Math.floor(diff / 1000);
+                        if (uptimeSeconds < 0) uptimeSeconds = 0;
                     }
-                    if (!nodesMap.get(nodeName).pods.includes(podName)) {
-                        nodesMap.get(nodeName).pods.push(podName);
-                    }
-                }
 
-                // Ensure Service exists
-                const serviceKey = `${namespace}:${serviceName}`;
-                if (!servicesMap.has(serviceKey)) {
-                    servicesMap.set(serviceKey, { name: serviceName, namespace, pods: [] });
-                }
+                    return {
+                        name: podInfo.name,
+                        node: podInfo.node,
+                        ramUsedMB: metrics.ramUsedMB,
+                        cpuUsageCores: metrics.cpuUsageCores,
+                        cpuUsagePercent: metrics.cpuUsagePercent,
+                        uptimeSeconds: uptimeSeconds,
+                        isReady: podInfo.isReady
+                    };
+                });
 
-                // Get metrics for this pod
-                const key = `${namespace}:${podName}`;
-                const metrics = podMetricsMap.get(key) || {
-                    ramUsedMB: 0,
-                    cpuUsageCores: 0,
-                    cpuUsagePercent: 0,
-                    uptimeSeconds: 0
-                };
+                // Determine Infrastructure Availability (At least one pod ready)
+                const availablePodCount = podDetails.filter(p => p.isReady).length;
+                const availability = availablePodCount > 0 ? 1 : 0;
 
-                // Calculate uptime from startTime if available
-                let uptimeSeconds = 0;
-                if (metrics.startTime) {
-                    const diff = Date.now() - new Date(metrics.startTime).getTime();
-                    uptimeSeconds = Math.floor(diff / 1000);
-                    if (uptimeSeconds < 0) uptimeSeconds = 0;
-                }
-
-                // Add pod to service
-                servicesMap.get(serviceKey).pods.push({
-                    name: podName,
-                    node: nodeName,
-                    ramUsedMB: metrics.ramUsedMB,
-                    cpuUsageCores: metrics.cpuUsageCores,
-                    cpuUsagePercent: metrics.cpuUsagePercent,
-                    uptimeSeconds: uptimeSeconds
+                servicesMap.set(key, {
+                    name: serviceData.name,
+                    namespace: serviceData.namespace,
+                    pods: podDetails,
+                    podCount: podDetails.length,
+                    availability: availability
                 });
             });
         }
@@ -306,3 +288,19 @@ async function fetchInfrastructure() {
 }
 
 module.exports = { fetchPrometheusFiles, fetchPodPlacement, fetchInfrastructure };
+
+function getDestinationName(metric) {
+    const workload = metric.destination_workload;
+    if (workload && workload !== 'unknown') {
+        return workload;
+    }
+    return metric.destination_service_name;
+}
+
+function getDestinationNamespace(metric) {
+    const ns = metric.destination_workload_namespace;
+    if (ns && ns !== 'unknown') {
+        return ns;
+    }
+    return metric.destination_service_namespace;
+}
