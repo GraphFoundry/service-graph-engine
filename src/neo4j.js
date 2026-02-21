@@ -131,7 +131,9 @@ SET n.cpuUsagePercent = row.cpuUsagePercent, n.cores = row.cores,
 
 WITH $batchServices AS batchServices
 UNWIND $batchServices AS sRow
-MATCH (s:Service {namespace: sRow.namespace, name: sRow.name})
+MERGE (s:Service {serviceId: sRow.namespace + ":" + sRow.name})
+  ON CREATE SET s.name = sRow.name, s.namespace = sRow.namespace, s.createdAt = datetime()
+  ON MATCH SET s.name = sRow.name, s.namespace = sRow.namespace
 SET s.podCount = sRow.podCount, s.availability = sRow.availability, s.updatedAt = datetime()
 WITH batchServices, s, sRow, [pRow IN sRow.pods | pRow.name] AS currentPodNames
 OPTIONAL MATCH (s)-[stalePodRel:HAS_POD]->(p:Pod)

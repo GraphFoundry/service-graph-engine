@@ -4,6 +4,18 @@ const { updateGraph, updateInfrastructure, closeDriver, initSchema, driver, getL
 const { checkGDSAvailability, calculateScores } = require('./src/scores_local');
 const { startServer } = require('./src/server');
 const webhook = require('./src/webhook');
+const OVERVIEW_NAMESPACE = process.env.OVERVIEW_NAMESPACE || 'onlineboutique';
+
+function toNumber(value, fallback = 0) {
+    if (value === null || value === undefined) return fallback;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : fallback;
+    if (typeof value === 'object' && typeof value.toNumber === 'function') {
+        const n = value.toNumber();
+        return Number.isFinite(n) ? n : fallback;
+    }
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+}
 
 async function runSync() {
     console.log(`[${new Date().toISOString()}] Starting sync cycle...`);
@@ -42,13 +54,14 @@ async function pushWebhookUpdate(infra) {
             // Query metrics snapshot (same logic as GET /metrics/snapshot)
             const edgeQuery = `
                 MATCH (a:Service)-[r:CALLS_NOW]->(b:Service)
+                WHERE a.namespace = $namespace AND b.namespace = $namespace
                 RETURN a.name AS fromName, a.namespace AS fromNs,
                        a.podCount AS fromPodCount, a.availability AS fromAvailability,
                        b.name AS toName, b.namespace AS toNs,
                        b.podCount AS toPodCount, b.availability AS toAvailability,
                        r.rate AS rps, r.errorRate AS errorRate, r.p95 AS p95
             `;
-            const edgeResult = await session.run(edgeQuery);
+            const edgeResult = await session.run(edgeQuery, { namespace: OVERVIEW_NAMESPACE });
 
             const edges = [];
             const serviceMetrics = new Map();
@@ -56,15 +69,15 @@ async function pushWebhookUpdate(infra) {
             edgeResult.records.forEach(record => {
                 const fromName = record.get('fromName');
                 const fromNs = record.get('fromNs');
-                const fromPodCount = record.get('fromPodCount');
-                const fromAvailability = record.get('fromAvailability');
+                const fromPodCount = toNumber(record.get('fromPodCount'));
+                const fromAvailability = toNumber(record.get('fromAvailability'));
                 const toName = record.get('toName');
                 const toNs = record.get('toNs');
-                const toPodCount = record.get('toPodCount');
-                const toAvailability = record.get('toAvailability');
-                const rps = record.get('rps') || 0;
-                const errorRate = record.get('errorRate') || 0;
-                const p95 = record.get('p95') || 0;
+                const toPodCount = toNumber(record.get('toPodCount'));
+                const toAvailability = toNumber(record.get('toAvailability'));
+                const rps = toNumber(record.get('rps'));
+                const errorRate = toNumber(record.get('errorRate'));
+                const p95 = toNumber(record.get('p95'));
 
                 edges.push({
                     from: fromName,
@@ -94,7 +107,7 @@ async function pushWebhookUpdate(infra) {
                 tm.maxP95 = Math.max(tm.maxP95, p95);
             });
 
-            const services = Array.from(serviceMetrics.values()).map(m => ({
+            let services = Array.from(serviceMetrics.values()).map(m => ({
                 name: m.name,
                 namespace: m.namespace,
                 rps: parseFloat(m.totalRps.toFixed(2)),
@@ -104,7 +117,7 @@ async function pushWebhookUpdate(infra) {
                 availability: m.availability || 0
             }));
 
-            const metricsSnapshot = {
+            let metricsSnapshot = {
                 timestamp: new Date(lastUpdate).toISOString(),
                 window: config.prometheus.queryWindow,
                 services,
@@ -114,6 +127,7 @@ async function pushWebhookUpdate(infra) {
             // Query services with placement (same logic as GET /services)
             const svcQuery = `
                 MATCH (s:Service)
+                WHERE s.namespace = $namespace
                 OPTIONAL MATCH (s)-[:HAS_POD]->(p:Pod)-[:RUNS_ON]->(n:Node)
                 RETURN s.name AS name, s.namespace AS namespace,
                        s.podCount AS podCount, s.availability AS availability,
@@ -129,13 +143,48 @@ async function pushWebhookUpdate(infra) {
                            nodeRamTotal: n.ramTotalMB
                        }) AS placements
             `;
-            const svcResult = await session.run(svcQuery);
+            const svcResult = await session.run(svcQuery, { namespace: OVERVIEW_NAMESPACE });
+
+            // Merge services discovered from Kubernetes even if they have no current traffic edges.
+            svcResult.records.forEach(record => {
+                const name = record.get('name');
+                const namespace = record.get('namespace');
+                if (!name || !namespace) return;
+                const key = `${namespace}:${name}`;
+                if (serviceMetrics.has(key)) return;
+                serviceMetrics.set(key, {
+                    name,
+                    namespace,
+                    totalRps: 0,
+                    totalErrors: 0,
+                    maxP95: 0,
+                    podCount: toNumber(record.get('podCount')),
+                    availability: toNumber(record.get('availability'))
+                });
+            });
+
+            services = Array.from(serviceMetrics.values()).map(m => ({
+                name: m.name,
+                namespace: m.namespace,
+                rps: parseFloat(m.totalRps.toFixed(2)),
+                errorRate: m.totalRps > 0 ? parseFloat((m.totalErrors / m.totalRps).toFixed(4)) : 0,
+                p95: parseFloat(m.maxP95.toFixed(2)),
+                podCount: m.podCount || 0,
+                availability: m.availability || 0
+            }));
+
+            metricsSnapshot = {
+                timestamp: new Date(lastUpdate).toISOString(),
+                window: config.prometheus.queryWindow,
+                services,
+                edges
+            };
 
             const servicesWithPlacement = svcResult.records.map(record => {
                 const name = record.get('name');
                 const namespace = record.get('namespace');
-                const podCount = record.get('podCount') || 0;
-                const availability = record.get('availability') || 0;
+                const podCount = toNumber(record.get('podCount'));
+                const availability = toNumber(record.get('availability'));
                 const placements = record.get('placements') || [];
 
                 const nodesMap = new Map();

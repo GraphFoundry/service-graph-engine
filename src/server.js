@@ -10,6 +10,18 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+const OVERVIEW_NAMESPACE = process.env.OVERVIEW_NAMESPACE || 'onlineboutique';
+
+function toNumber(value, fallback = 0) {
+    if (value === null || value === undefined) return fallback;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : fallback;
+    if (typeof value === 'object' && typeof value.toNumber === 'function') {
+        const n = value.toNumber();
+        return Number.isFinite(n) ? n : fallback;
+    }
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+}
 
 // Swagger Documentation
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(specs, {
@@ -117,13 +129,14 @@ app.get('/metrics/snapshot', async (req, res) => {
         // Query all edges with current metrics
         const edgeQuery = `
             MATCH (a:Service)-[r:CALLS_NOW]->(b:Service)
+            WHERE a.namespace = $namespace AND b.namespace = $namespace
             RETURN a.name AS fromName, a.namespace AS fromNs,
                    a.podCount AS fromPodCount, a.availability AS fromAvailability,
                    b.name AS toName, b.namespace AS toNs,
                    b.podCount AS toPodCount, b.availability AS toAvailability,
                    r.rate AS rps, r.errorRate AS errorRate, r.p95 AS p95
         `;
-        const edgeResult = await session.run(edgeQuery);
+        const edgeResult = await session.run(edgeQuery, { namespace: OVERVIEW_NAMESPACE });
 
         // Build edges array and collect service metrics
         const edges = [];
@@ -132,15 +145,15 @@ app.get('/metrics/snapshot', async (req, res) => {
         edgeResult.records.forEach(record => {
             const fromName = record.get('fromName');
             const fromNs = record.get('fromNs');
-            const fromPodCount = record.get('fromPodCount');
-            const fromAvailability = record.get('fromAvailability');
+            const fromPodCount = toNumber(record.get('fromPodCount'));
+            const fromAvailability = toNumber(record.get('fromAvailability'));
             const toName = record.get('toName');
             const toNs = record.get('toNs');
-            const toPodCount = record.get('toPodCount');
-            const toAvailability = record.get('toAvailability');
-            const rps = record.get('rps') || 0;
-            const errorRate = record.get('errorRate') || 0;
-            const p95 = record.get('p95') || 0;
+            const toPodCount = toNumber(record.get('toPodCount'));
+            const toAvailability = toNumber(record.get('toAvailability'));
+            const rps = toNumber(record.get('rps'));
+            const errorRate = toNumber(record.get('errorRate'));
+            const p95 = toNumber(record.get('p95'));
 
             // Add to edges array
             edges.push({
@@ -187,6 +200,30 @@ app.get('/metrics/snapshot', async (req, res) => {
             toMetric.totalRps += rps;
             toMetric.totalErrors += rps * errorRate;
             toMetric.maxP95 = Math.max(toMetric.maxP95, p95);
+        });
+
+        // Ensure isolated services from Kubernetes discovery are visible with zero traffic defaults.
+        const allServicesQuery = `
+            MATCH (s:Service)
+            WHERE s.namespace = $namespace
+            RETURN s.name AS name, s.namespace AS namespace, s.podCount AS podCount, s.availability AS availability
+        `;
+        const allServicesResult = await session.run(allServicesQuery, { namespace: OVERVIEW_NAMESPACE });
+        allServicesResult.records.forEach(record => {
+            const name = record.get('name');
+            const namespace = record.get('namespace');
+            if (!name || !namespace) return;
+            const key = `${namespace}:${name}`;
+            if (serviceMetrics.has(key)) return;
+            serviceMetrics.set(key, {
+                name,
+                namespace,
+                totalRps: 0,
+                totalErrors: 0,
+                maxP95: 0,
+                podCount: toNumber(record.get('podCount')),
+                availability: toNumber(record.get('availability'))
+            });
         });
 
         // Build services array
