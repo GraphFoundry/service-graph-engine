@@ -1,0 +1,22 @@
+# Secrets & keys
+.env
+.env.*
+!.env.example
+*.pem
+
+# Dependencies (rebuilt in Docker)
+node_modules/
+
+# VCS & IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+
+# Dev / docs artifacts
+k8s-example/
+README.md
+Dockerfile
+*.log
+*.md
