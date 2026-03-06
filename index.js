@@ -5,6 +5,8 @@ const { checkGDSAvailability, calculateScores } = require('./src/scores_local');
 const { startServer } = require('./src/server');
 const webhook = require('./src/webhook');
 const OVERVIEW_NAMESPACE = process.env.OVERVIEW_NAMESPACE || 'onlineboutique';
+let syncInFlight = false;
+let scoreInFlight = false;
 
 function toNumber(value, fallback = 0) {
     if (value === null || value === undefined) return fallback;
@@ -18,6 +20,11 @@ function toNumber(value, fallback = 0) {
 }
 
 async function runSync() {
+    if (syncInFlight) {
+        console.warn(`[${new Date().toISOString()}] Skipping sync cycle (previous sync still running).`);
+        return;
+    }
+    syncInFlight = true;
     console.log(`[${new Date().toISOString()}] Starting sync cycle...`);
     try {
         const metrics = await fetchPrometheusFiles();
@@ -37,6 +44,21 @@ async function runSync() {
         await pushWebhookUpdate(infra);
     } catch (error) {
         console.error('Error during sync cycle:', error);
+    } finally {
+        syncInFlight = false;
+    }
+}
+
+async function calculateScoresSafely() {
+    if (scoreInFlight) {
+        console.warn(`[${new Date().toISOString()}] Skipping score calculation (previous run still running).`);
+        return;
+    }
+    scoreInFlight = true;
+    try {
+        await calculateScores();
+    } finally {
+        scoreInFlight = false;
     }
 }
 
@@ -288,14 +310,14 @@ async function startService() {
     await runSync();
 
     // Run Score Calculation immediately on start (optional, good for verification)
-    await calculateScores();
+    await calculateScoresSafely();
 
     // Schedule polling
     const pollIntervalId = setInterval(runSync, config.app.pollIntervalMs);
     console.log(`Telemetry Polling started. Interval: ${config.app.pollIntervalMs / 1000} seconds.`);
 
     // Schedule Score Calculation
-    const scoreIntervalId = setInterval(calculateScores, config.app.scoreCalculationIntervalMs);
+    const scoreIntervalId = setInterval(calculateScoresSafely, config.app.scoreCalculationIntervalMs);
     console.log(`Score Calculation started. Interval: ${config.app.scoreCalculationIntervalMs / 1000} seconds.`);
 
     // Start API Server

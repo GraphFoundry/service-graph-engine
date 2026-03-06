@@ -358,7 +358,7 @@ app.get('/graph/health', (req, res) => {
  *                               properties:
  *                                 node:
  *                                   type: string
- *                                   example: "minikube-m02"
+ *                                   example: "k8s-node-01"
  *                                   description: Kubernetes node name
  *                                 resources:
  *                                   type: object
@@ -437,7 +437,7 @@ app.get('/graph/health', (req, res) => {
  *                     properties:
  *                       name:
  *                         type: string
- *                         example: "minikube-m02"
+ *                         example: "k8s-node-01"
  *                       resources:
  *                         type: object
  *                         properties:
@@ -828,11 +828,14 @@ app.get('/services/:service/neighborhood', async (req, res) => {
             availability: Number(centerRecord.get('availability') || 0),
         };
 
-        let pattern = `(center)-[*1..${k}]-(m)`;
+        // Restrict traversal to live service-call edges only. Including all relationship
+        // types (history, pod placement, infra links) can explode path search and stall
+        // neighborhood queries during demos.
+        let pattern = `(center)-[:CALLS_NOW*1..${k}]-(m)`;
         if (direction === 'in') {
-            pattern = `(m)-[*1..${k}]->(center)`;
+            pattern = `(m)-[:CALLS_NOW*1..${k}]->(center)`;
         } else if (direction === 'out') {
-            pattern = `(center)-[*1..${k}]->(m)`;
+            pattern = `(center)-[:CALLS_NOW*1..${k}]->(m)`;
         }
 
         const neighborhoodQuery = `
