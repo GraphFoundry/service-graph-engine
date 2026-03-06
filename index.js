@@ -83,7 +83,7 @@ async function pushWebhookUpdate(infra) {
                     from: fromName,
                     to: toName,
                     namespace: toNs,
-                    rps: parseFloat(rps.toFixed ? rps.toFixed(2) : rps),
+                    rps: parseFloat(rps.toFixed ? rps.toFixed(6) : rps),
                     errorRate: parseFloat(errorRate.toFixed ? errorRate.toFixed(4) : errorRate),
                     p95: parseFloat(p95.toFixed ? p95.toFixed(2) : p95)
                 });
@@ -110,7 +110,7 @@ async function pushWebhookUpdate(infra) {
             let services = Array.from(serviceMetrics.values()).map(m => ({
                 name: m.name,
                 namespace: m.namespace,
-                rps: parseFloat(m.totalRps.toFixed(2)),
+                rps: parseFloat(m.totalRps.toFixed(6)),
                 errorRate: m.totalRps > 0 ? parseFloat((m.totalErrors / m.totalRps).toFixed(4)) : 0,
                 p95: parseFloat(m.maxP95.toFixed(2)),
                 podCount: m.podCount || 0,
@@ -166,7 +166,7 @@ async function pushWebhookUpdate(infra) {
             services = Array.from(serviceMetrics.values()).map(m => ({
                 name: m.name,
                 namespace: m.namespace,
-                rps: parseFloat(m.totalRps.toFixed(2)),
+                rps: parseFloat(m.totalRps.toFixed(6)),
                 errorRate: m.totalRps > 0 ? parseFloat((m.totalErrors / m.totalRps).toFixed(4)) : 0,
                 p95: parseFloat(m.maxP95.toFixed(2)),
                 podCount: m.podCount || 0,

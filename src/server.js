@@ -160,7 +160,7 @@ app.get('/metrics/snapshot', async (req, res) => {
                 from: fromName,
                 to: toName,
                 namespace: toNs, // Edge belongs to destination namespace
-                rps: parseFloat(rps.toFixed(2)),
+                rps: parseFloat(rps.toFixed(6)),
                 errorRate: parseFloat(errorRate.toFixed(4)),
                 p95: parseFloat(p95.toFixed(2))
             });
@@ -230,7 +230,7 @@ app.get('/metrics/snapshot', async (req, res) => {
         const services = Array.from(serviceMetrics.values()).map(metric => ({
             name: metric.name,
             namespace: metric.namespace,
-            rps: parseFloat(metric.totalRps.toFixed(2)),
+            rps: parseFloat(metric.totalRps.toFixed(6)),
             errorRate: metric.totalRps > 0
                 ? parseFloat((metric.totalErrors / metric.totalRps).toFixed(4))
                 : 0,

@@ -8,6 +8,9 @@ const BY_CLAUSE = `by (source_workload, source_workload_namespace, ${DEST_NAME_L
 
 const QUERIES = {
     rps: `sum(rate(istio_requests_total[${config.prometheus.queryWindow}])) ${BY_CLAUSE}`,
+    // Historical fallback when short-window live traffic is zero across all edges.
+    // Converts 24h increase into a per-second average.
+    rpsHistoricalAvg: `sum(increase(istio_requests_total[24h])) ${BY_CLAUSE} / 86400`,
     // Use `or` union before aggregation so missing 5xx/non-5xx branches contribute 0
     // instead of dropping the whole vector during arithmetic.
     errorRate: `sum(
@@ -144,6 +147,66 @@ async function fetchPrometheusFiles() {
         fetchMetric('availability', QUERIES.availability, true),
         fetchMetric('podCount', QUERIES.podCount, true)
     ]);
+
+    // If live 1m rate is zero for all edges, fall back to a 24h average.
+    const hasAnyLiveRate = Array.from(metricsMap.values()).some((metric) => Number(metric.rate) > 0);
+    if (!hasAnyLiveRate && metricsMap.size > 0) {
+        try {
+            const url = `${config.prometheus.url}/api/v1/query`;
+            const response = await axios.get(url, { params: { query: QUERIES.rpsHistoricalAvg } });
+            if (response.data.status === 'success') {
+                let fallbackApplied = 0;
+                const results = response.data.data.result || [];
+                results.forEach((result) => {
+                    const sourceName = result.metric.source_workload;
+                    const sourceNs = result.metric.source_workload_namespace;
+                    const destName = getDestinationName(result.metric);
+                    const destNs = getDestinationNamespace(result.metric);
+
+                    if (!sourceName || sourceName === 'unknown' || !destName || destName === 'unknown') {
+                        return;
+                    }
+                    if (!sourceNs || sourceNs === 'unknown' || !destNs || destNs === 'unknown') {
+                        return;
+                    }
+
+                    const sourceId = `${sourceNs}:${sourceName}`;
+                    const destId = `${destNs}:${destName}`;
+                    const key = `${sourceId}|${destId}`;
+                    const value = parseFloat(result.value[1]);
+                    if (isNaN(value) || value <= 0) return;
+
+                    if (!metricsMap.has(key)) {
+                        metricsMap.set(key, {
+                            sourceId,
+                            sourceName,
+                            sourceNamespace: sourceNs,
+                            destId,
+                            destName,
+                            destNamespace: destNs,
+                            rate: 0,
+                            errorRate: 0,
+                            p50: 0,
+                            p95: 0,
+                            p99: 0
+                        });
+                    }
+
+                    const metric = metricsMap.get(key);
+                    if (Number(metric.rate) <= 0) {
+                        metric.rate = value;
+                        fallbackApplied += 1;
+                    }
+                });
+
+                if (fallbackApplied > 0) {
+                    console.log(`[Prometheus] Applied 24h historical RPS fallback to ${fallbackApplied} edges.`);
+                }
+            }
+        } catch (error) {
+            console.error('Failed to fetch rpsHistoricalAvg fallback:', error.message);
+        }
+    }
 
     // Enrich edges with Node metrics
     for (const metric of metricsMap.values()) {
