@@ -10,7 +10,7 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
-const OVERVIEW_NAMESPACE = process.env.OVERVIEW_NAMESPACE || 'onlineboutique';
+const OVERVIEW_NAMESPACE = process.env.OVERVIEW_NAMESPACE || 'default';
 
 function toNumber(value, fallback = 0) {
     if (value === null || value === undefined) return fallback;

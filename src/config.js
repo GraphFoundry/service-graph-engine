@@ -6,13 +6,13 @@ module.exports = {
     queryWindow: '1m', // As per requirement
   },
   neo4j: {
-    uri: process.env.NEO4J_URI || 'neo4j+s://517b3e75.databases.neo4j.io',
+    uri: process.env.NEO4J_URI || 'neo4j://localhost:7687',
     user: process.env.NEO4J_USER || 'neo4j',
-    password: process.env.NEO4J_PASSWORD || 'Ex-hfrpIOCfghD-dZ04f2ya3-zbUpBdsZSgjwl6a8Rg',
+    password: process.env.NEO4J_PASSWORD || 'test1234',
     database: process.env.NEO4J_DATABASE || 'neo4j',
   },
   kubernetes: {
-    apiUrl: process.env.KUBERNETES_API_URL || 'http://140.245.39.115:8005',
+    apiUrl: process.env.KUBERNETES_API_URL || 'https://kubernetes.default.svc',
   },
   app: {
     pollIntervalMs: process.env.POLL_INTERVAL_Ms || 30000, // 30 seconds

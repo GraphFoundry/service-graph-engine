@@ -4,7 +4,7 @@ const { updateGraph, updateInfrastructure, closeDriver, initSchema, driver, getL
 const { checkGDSAvailability, calculateScores } = require('./src/scores_local');
 const { startServer } = require('./src/server');
 const webhook = require('./src/webhook');
-const OVERVIEW_NAMESPACE = process.env.OVERVIEW_NAMESPACE || 'onlineboutique';
+const OVERVIEW_NAMESPACE = process.env.OVERVIEW_NAMESPACE || 'default';
 let syncInFlight = false;
 let scoreInFlight = false;
 

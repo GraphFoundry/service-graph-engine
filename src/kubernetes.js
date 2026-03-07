@@ -1,5 +1,27 @@
 const axios = require('axios');
+const fs = require('fs');
+const https = require('https');
 const config = require('./config');
+
+// ── In-cluster Kubernetes authentication ────────────────────────────────────
+const SA_TOKEN_PATH = '/var/run/secrets/kubernetes.io/serviceaccount/token';
+const SA_CA_PATH = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt';
+
+function buildK8sAxiosConfig() {
+    const axiosCfg = { timeout: 10000 };
+
+    // When running in-cluster, the SA token & CA cert are mounted automatically
+    if (fs.existsSync(SA_TOKEN_PATH)) {
+        const token = fs.readFileSync(SA_TOKEN_PATH, 'utf8').trim();
+        axiosCfg.headers = { Authorization: `Bearer ${token}` };
+    }
+    if (fs.existsSync(SA_CA_PATH)) {
+        axiosCfg.httpsAgent = new https.Agent({
+            ca: fs.readFileSync(SA_CA_PATH),
+        });
+    }
+    return axiosCfg;
+}
 
 /**
  * Fetch Node and Pod metrics from Kubernetes API
@@ -8,11 +30,12 @@ const config = require('./config');
 async function fetchKubernetesMetrics() {
     try {
         const baseUrl = config.kubernetes.apiUrl;
+        const k8sCfg = buildK8sAxiosConfig();
 
         // Parallel fetch: Nodes list, Node Metrics, and Pod List (cluster-wide)
         const [nodesRes, podsRes] = await Promise.all([
-            axios.get(`${baseUrl}/api/v1/nodes`),
-            axios.get(`${baseUrl}/api/v1/pods`)
+            axios.get(`${baseUrl}/api/v1/nodes`, k8sCfg),
+            axios.get(`${baseUrl}/api/v1/pods`, k8sCfg)
         ]);
 
         const nodesList = nodesRes.data.items;
@@ -40,7 +63,7 @@ async function fetchKubernetesMetrics() {
 
             try {
                 // Fetch Summary
-                const summaryRes = await axios.get(`${baseUrl}/api/v1/nodes/${nodeName}/proxy/stats/summary`);
+                const summaryRes = await axios.get(`${baseUrl}/api/v1/nodes/${nodeName}/proxy/stats/summary`, k8sCfg);
                 const summary = summaryRes.data;
                 const nodeStats = summary.node;
 
