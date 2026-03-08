@@ -31,14 +31,16 @@ const SNAPSHOT_QUERY = `
 UNWIND $batch AS row
 MERGE (a:Service {serviceId: row.sourceId})
   ON CREATE SET a.name = row.sourceName, a.namespace = row.sourceNamespace, a.createdAt = datetime(),
-                a.updatedAt = datetime(), a.podCount = row.sourcePodCount, a.availability = row.sourceAvailability
+                a.updatedAt = datetime(), a.podCount = row.sourcePodCount,
+                a.availability = row.sourceAvailability, a.successRate = row.sourceAvailability
   ON MATCH SET a.updatedAt = datetime(),
-               a.podCount = row.sourcePodCount, a.availability = row.sourceAvailability
+               a.podCount = row.sourcePodCount, a.successRate = row.sourceAvailability
 MERGE (b:Service {serviceId: row.destId})
   ON CREATE SET b.name = row.destName, b.namespace = row.destNamespace, b.createdAt = datetime(),
-                b.updatedAt = datetime(), b.podCount = row.destPodCount, b.availability = row.destAvailability
+                b.updatedAt = datetime(), b.podCount = row.destPodCount,
+                b.availability = row.destAvailability, b.successRate = row.destAvailability
   ON MATCH SET b.updatedAt = datetime(),
-               b.podCount = row.destPodCount, b.availability = row.destAvailability
+               b.podCount = row.destPodCount, b.successRate = row.destAvailability
 MERGE (a)-[r:CALLS_NOW]->(b)
 SET
   r.rate = row.rate,
@@ -54,7 +56,7 @@ SET
 const MARK_UNAVAILABLE_QUERY = `
 MATCH (s:Service)
 WHERE NOT s.serviceId IN $activeServiceIds
-SET s.availability = 0, s.podCount = 0, s.updatedAt = datetime()
+SET s.podCount = 0, s.updatedAt = datetime()
 `;
 
 const HISTORY_QUERY = `

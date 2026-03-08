@@ -503,6 +503,7 @@ app.get('/services', async (req, res) => {
             MATCH (s:Service)
             OPTIONAL MATCH (s)-[:HAS_POD]->(p:Pod)-[:RUNS_ON]->(n:Node)
             RETURN s.name AS name, s.namespace AS namespace, s.podCount AS podCount, s.availability AS availability,
+                   s.successRate AS successRate,
                    collect({pod: p.name, node: n.name, 
                             podRamUsedMB: p.ramUsedMB, podCpuUsageCores: p.cpuUsageCores, podUptimeSeconds: p.uptimeSeconds,
                             cpuUsagePercent: n.cpuUsagePercent, cores: n.cores, 
@@ -515,6 +516,7 @@ app.get('/services', async (req, res) => {
             const namespace = record.get('namespace');
             const podCount = Math.floor(Number(record.get('podCount') || 0));
             const availability = Number(record.get('availability') || 0);
+            const successRate = record.get('successRate');
             const placementData = record.get('placementData');
 
             // Group by Node
@@ -557,6 +559,7 @@ app.get('/services', async (req, res) => {
                 namespace,
                 podCount,
                 availability,
+                successRate: successRate != null ? Number(successRate) : null,
                 placement: {
                     nodes: Array.from(nodesMap.values())
                 }
@@ -861,7 +864,8 @@ app.get('/services/:service/neighborhood', async (req, res) => {
                     name: n.name,
                     namespace: n.namespace,
                     podCount: n.podCount,
-                    availability: n.availability
+                    availability: n.availability,
+                    successRate: n.successRate
                 }] AS nodes,
                 [r IN rels | {
                     source: startNode(r).serviceId,
@@ -889,6 +893,7 @@ app.get('/services/:service/neighborhood', async (req, res) => {
                     namespace: node.namespace || 'default',
                     podCount: Math.floor(Number(node.podCount || 0)),
                     availability: Number(node.availability || 0),
+                    successRate: node.successRate != null ? Number(node.successRate) : null,
                 }));
             edges = (result.records[0].get('edges') || [])
                 .filter(Boolean)
