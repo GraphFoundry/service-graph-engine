@@ -45,13 +45,13 @@ async function fetchKubernetesMetrics() {
         const podMetricsMap = new Map(); // Key: "namespace:podName"
         const servicesMap = new Map();   // Key: "namespace:serviceName"
 
-        // 1. Process Nodes (Capacity)
+        // 1. Process Nodes (Allocatable resources)
         const nodeCapacities = new Map(); // nodeName -> { cpuTotal, ramTotal }
         nodesList.forEach(node => {
             const nodeName = node.metadata.name;
-            const capacity = node.status.capacity;
-            const cpuTotalCores = parseCpu(capacity.cpu);
-            const ramTotalBytes = parseMemory(capacity.memory);
+            const allocatable = node.status.allocatable || node.status.capacity || {};
+            const cpuTotalCores = parseCpu(allocatable.cpu);
+            const ramTotalBytes = parseMemory(allocatable.memory);
             nodeCapacities.set(nodeName, { cpuTotalCores, ramTotalBytes });
         });
 
