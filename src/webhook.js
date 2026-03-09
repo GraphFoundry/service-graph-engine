@@ -51,7 +51,7 @@ function buildEventID(payloadData) {
         .createHash('sha256')
         .update(JSON.stringify(payloadData))
         .digest('hex')
-        .slice(0, 12);
+        .slice(0, 24);
     return `evt_${Date.now()}_${dataHash}`;
 }
 
@@ -152,6 +152,13 @@ async function deliverWithRetry(url, payload, headers) {
                 stats.successfulDeliveries += 1;
                 stats.lastDeliveryAt = new Date().toISOString();
                 updateLatencyStats(Date.now() - startedAt);
+                return response.status;
+            }
+
+            // Treat 409 Conflict (duplicate/hash-conflict) as a benign success
+            if (response.status === 409) {
+                stats.successfulDeliveries += 1;
+                stats.lastDeliveryAt = new Date().toISOString();
                 return response.status;
             }
 

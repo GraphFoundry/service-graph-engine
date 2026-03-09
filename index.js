@@ -313,12 +313,21 @@ async function startService() {
     await calculateScoresSafely();
 
     // Schedule polling
-    const pollIntervalId = setInterval(runSync, config.app.pollIntervalMs);
+    let pollIntervalId = setInterval(runSync, config.app.pollIntervalMs);
     console.log(`Telemetry Polling started. Interval: ${config.app.pollIntervalMs / 1000} seconds.`);
 
     // Schedule Score Calculation
-    const scoreIntervalId = setInterval(calculateScoresSafely, config.app.scoreCalculationIntervalMs);
+    let scoreIntervalId = setInterval(calculateScoresSafely, config.app.scoreCalculationIntervalMs);
     console.log(`Score Calculation started. Interval: ${config.app.scoreCalculationIntervalMs / 1000} seconds.`);
+
+    // Register reload callback to restart intervals when config changes
+    config._onReload = () => {
+        clearInterval(pollIntervalId);
+        clearInterval(scoreIntervalId);
+        pollIntervalId = setInterval(runSync, config.app.pollIntervalMs);
+        scoreIntervalId = setInterval(calculateScoresSafely, config.app.scoreCalculationIntervalMs);
+        console.log(`[CONFIG] Intervals restarted: poll=${config.app.pollIntervalMs}ms, score=${config.app.scoreCalculationIntervalMs}ms`);
+    };
 
     // Start API Server
     startServer();

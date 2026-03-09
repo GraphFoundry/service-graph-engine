@@ -1137,6 +1137,34 @@ app.get('/webhooks/status', (req, res) => {
     });
 });
 
+// Runtime config reload endpoint
+app.post('/admin/reload-config', (req, res) => {
+    try {
+        config.reloadFromFile('/etc/runtime-config/runtime.env');
+        // Apply env overrides from request body (takes precedence over file,
+        // which may not be updated yet due to kubelet ConfigMap sync delay)
+        const envOverrides = req.body?.env;
+        if (envOverrides && typeof envOverrides === 'object') {
+            for (const [key, value] of Object.entries(envOverrides)) {
+                process.env[key] = String(value);
+            }
+            // Re-apply config from env after overrides
+            config.app.pollIntervalMs = parseInt(process.env.POLL_INTERVAL_Ms, 10) || 30000;
+            config.app.scoreCalculationIntervalMs = parseInt(process.env.SCORE_CALCULATION_INTERVAL_Ms, 10) || 120000;
+            console.log(`[CONFIG] Applied env overrides: ${JSON.stringify(envOverrides)}`);
+            console.log(`[CONFIG] pollIntervalMs=${config.app.pollIntervalMs}, scoreCalculationIntervalMs=${config.app.scoreCalculationIntervalMs}`);
+        }
+        // Notify index.js to restart intervals
+        if (typeof config._onReload === 'function') {
+            config._onReload();
+        }
+        res.json({ status: 'reloaded' });
+    } catch (err) {
+        console.error('[CONFIG] Reload failed:', err);
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+});
+
 function startServer() {
     const port = config.app.port;
     app.listen(port, () => {
